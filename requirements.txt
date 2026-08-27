@@ -1,0 +1,4 @@
+# Gemini — uses plain requests, no extra SDK needed
+feedparser>=6.0.11
+requests>=2.31.0
+beautifulsoup4>=4.12.0

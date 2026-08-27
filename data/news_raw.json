@@ -1,0 +1,390 @@
+{
+  "generated_at": "2026-08-27T08:49:36.716793+05:30",
+  "mode": "BROAD (all NSE stocks)",
+  "news_count": 19,
+  "news": [
+    {
+      "id": "cf9b053ba96c",
+      "source": "NSE",
+      "title": "[JNPR] ",
+      "summary": "Bagging/Receiving of orders/contracts",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 22:33:20",
+      "symbols": [
+        "JNPR"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "3bffdf108f3c",
+      "source": "NSE",
+      "title": "[TIMETECHNO] ",
+      "summary": "Acquisition",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 21:59:32",
+      "symbols": [
+        "TIMETECHNO"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "c97d897f3357",
+      "source": "NSE",
+      "title": "[VIKRAMSOLR] ",
+      "summary": "Acquisition",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 21:18:10",
+      "symbols": [
+        "VIKRAMSOLR"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "e0554792781c",
+      "source": "NSE",
+      "title": "[PFOCUS] ",
+      "summary": "Acquisition",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 19:49:35",
+      "symbols": [
+        "PFOCUS"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "18de390a4bc2",
+      "source": "NSE",
+      "title": "[GICL] ",
+      "summary": "Clarification - Financial Results",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 18:11:03",
+      "symbols": [
+        "GICL"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "cb3d44acfd7e",
+      "source": "NSE",
+      "title": "[IRB] ",
+      "summary": "Acquisition",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 16:36:45",
+      "symbols": [
+        "IRB"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "847f3059e1a2",
+      "source": "NSE",
+      "title": "[SWANDEF] ",
+      "summary": "Amalgamation/Merger",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 16:20:25",
+      "symbols": [
+        "SWANDEF"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "11655df01b4c",
+      "source": "NSE",
+      "title": "[BEL] ",
+      "summary": "Bagging/Receiving of orders/contracts",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 15:43:09",
+      "symbols": [
+        "BEL"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "2de5ce30fa34",
+      "source": "NSE",
+      "title": "[GKENERGY] ",
+      "summary": "Awarding of order(s)/contract(s)",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 15:23:22",
+      "symbols": [
+        "GKENERGY"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "d7b4621830e4",
+      "source": "NSE",
+      "title": "[MOLDTECH] ",
+      "summary": "Dividend",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 15:12:50",
+      "symbols": [
+        "MOLDTECH"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "13293c726d7d",
+      "source": "NSE",
+      "title": "[MOLDTECH] ",
+      "summary": "Bonus",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 15:08:30",
+      "symbols": [
+        "MOLDTECH"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "98972bc75261",
+      "source": "NSE",
+      "title": "[JBFIND] ",
+      "summary": "Clarification - Financial Results",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 14:27:51",
+      "symbols": [
+        "JBFIND"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "cbb7b1cff0ef",
+      "source": "NSE",
+      "title": "[MOLDTKPAC] ",
+      "summary": "Dividend",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 14:09:30",
+      "symbols": [
+        "MOLDTKPAC"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "a6da2552c7f6",
+      "source": "NSE",
+      "title": "[MOLDTKPAC] ",
+      "summary": "Bonus",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 13:33:42",
+      "symbols": [
+        "MOLDTKPAC"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "1df02afa1034",
+      "source": "NSE",
+      "title": "[CEIGALL] ",
+      "summary": "Bagging/Receiving of orders/contracts",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 13:31:04",
+      "symbols": [
+        "CEIGALL"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "c6ae964d2edd",
+      "source": "NSE",
+      "title": "[AHLWEST] ",
+      "summary": "Reply to Clarification- Financial results",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 10:14:30",
+      "symbols": [
+        "AHLWEST"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "b76ac9d0a641",
+      "source": "NSE",
+      "title": "[SUBEXLTD] ",
+      "summary": "Awarding of order(s)/contract(s)",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 10:09:25",
+      "symbols": [
+        "SUBEXLTD"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "1cc5df75a5a2",
+      "source": "NSE",
+      "title": "[MTARTECH] ",
+      "summary": "Bagging/Receiving of orders/contracts",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 09:06:58",
+      "symbols": [
+        "MTARTECH"
+      ],
+      "type": "general"
+    },
+    {
+      "id": "18a5d18d4001",
+      "source": "NSE",
+      "title": "[SHRIPISTON] ",
+      "summary": "Acquisition",
+      "url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      "published": "26-Aug-2026 00:32:40",
+      "symbols": [
+        "SHRIPISTON"
+      ],
+      "type": "general"
+    }
+  ],
+  "prices": {
+    "AHLWEST": {
+      "symbol": "AHLWEST",
+      "price": 535.5999755859375,
+      "prev_close": 532.2999877929688,
+      "change_pct": 0.62,
+      "52w_high": 751.4,
+      "52w_low": 137.0,
+      "currency": "INR"
+    },
+    "BEL": {
+      "symbol": "BEL",
+      "price": 406.8999938964844,
+      "prev_close": 413.25,
+      "change_pct": -1.54,
+      "52w_high": 473.45,
+      "52w_low": 361.2,
+      "currency": "INR"
+    },
+    "CEIGALL": {
+      "symbol": "CEIGALL",
+      "price": 337.8500061035156,
+      "prev_close": 324.3500061035156,
+      "change_pct": 4.16,
+      "52w_high": 405.7,
+      "52w_low": 222.61,
+      "currency": "INR"
+    },
+    "GICL": {
+      "symbol": "GICL",
+      "price": 23.75,
+      "prev_close": 23.889999389648438,
+      "change_pct": -0.59,
+      "52w_high": 169.95,
+      "52w_low": 15.61,
+      "currency": "INR"
+    },
+    "GKENERGY": {
+      "symbol": "GKENERGY",
+      "price": 133.82000732421875,
+      "prev_close": 126.19000244140625,
+      "change_pct": 6.05,
+      "52w_high": 239.6,
+      "52w_low": 87.2,
+      "currency": "INR"
+    },
+    "IRB": {
+      "symbol": "IRB",
+      "price": 18.809999465942383,
+      "prev_close": 18.90999984741211,
+      "change_pct": -0.53,
+      "52w_high": 23.95,
+      "52w_low": 18.76,
+      "currency": "INR"
+    },
+    "JBFIND": {
+      "symbol": "JBFIND",
+      "price": null,
+      "prev_close": null,
+      "change_pct": null,
+      "52w_high": 4.3,
+      "52w_low": 4.3,
+      "currency": "INR"
+    },
+    "JNPR": {
+      "symbol": "JNPR",
+      "price": 267.44000244140625,
+      "prev_close": 258.9599914550781,
+      "change_pct": 3.27,
+      "52w_high": 281.89,
+      "52w_low": 232.11,
+      "currency": "INR"
+    },
+    "MOLDTECH": {
+      "symbol": "MOLDTECH",
+      "price": 191.5399932861328,
+      "prev_close": 193.6199951171875,
+      "change_pct": -1.07,
+      "52w_high": 221.0,
+      "52w_low": 101.1,
+      "currency": "INR"
+    },
+    "MOLDTKPAC": {
+      "symbol": "MOLDTKPAC",
+      "price": 706.7999877929688,
+      "prev_close": 716.25,
+      "change_pct": -1.32,
+      "52w_high": 870.5,
+      "52w_low": 464.9,
+      "currency": "INR"
+    },
+    "MTARTECH": {
+      "symbol": "MTARTECH",
+      "price": 6928.5,
+      "prev_close": 6812.0,
+      "change_pct": 1.71,
+      "52w_high": 8714.0,
+      "52w_low": 1390.5,
+      "currency": "INR"
+    },
+    "PFOCUS": {
+      "symbol": "PFOCUS",
+      "price": 302.54998779296875,
+      "prev_close": 302.75,
+      "change_pct": -0.07,
+      "52w_high": 367.0,
+      "52w_low": 139.04,
+      "currency": "INR"
+    },
+    "SHRIPISTON": {
+      "symbol": "SHRIPISTON",
+      "price": 4610.0,
+      "prev_close": 4629.89990234375,
+      "change_pct": -0.43,
+      "52w_high": 4785.8,
+      "52w_low": 2485.0,
+      "currency": "INR"
+    },
+    "SUBEXLTD": {
+      "symbol": "SUBEXLTD",
+      "price": 17.6200008392334,
+      "prev_close": 17.81999969482422,
+      "change_pct": -1.12,
+      "52w_high": 19.39,
+      "52w_low": 6.61,
+      "currency": "INR"
+    },
+    "SWANDEF": {
+      "symbol": "SWANDEF",
+      "price": 2333.800048828125,
+      "prev_close": 2330.699951171875,
+      "change_pct": 0.13,
+      "52w_high": 2750.0,
+      "52w_low": 390.8,
+      "currency": "INR"
+    },
+    "TIMETECHNO": {
+      "symbol": "TIMETECHNO",
+      "price": 184.83999633789062,
+      "prev_close": 185.0500030517578,
+      "change_pct": -0.11,
+      "52w_high": 249.15,
+      "52w_low": 154.0,
+      "currency": "INR"
+    },
+    "VIKRAMSOLR": {
+      "symbol": "VIKRAMSOLR",
+      "price": 171.85000610351562,
+      "prev_close": 169.99000549316406,
+      "change_pct": 1.09,
+      "52w_high": 407.95,
+      "52w_low": 155.38,
+      "currency": "INR"
+    }
+  }
+}

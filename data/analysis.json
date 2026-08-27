@@ -1,0 +1,776 @@
+{
+  "analyses": [
+    {
+      "news_id": "cf9b053ba96c",
+      "symbol": "JNPR",
+      "headline": "JNPR secures new contracts enhancing revenue visibility",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Securing new contracts strengthens the order book and supports near-term top-line growth. Margins are expected to remain stable subject to raw material costs."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.5,
+        "short_term_pct_high": 3.5,
+        "medium_term_pct_low": 4.0,
+        "medium_term_pct_high": 8.0,
+        "rationale": "Order inflows provide immediate positive momentum and underpin revenue visibility over the medium term."
+      },
+      "signal": "WATCH",
+      "conviction": 6,
+      "key_risks": [
+        "Execution delays",
+        "Cost overruns"
+      ],
+      "key_catalysts": [
+        "Timely execution of contracts",
+        "Further order wins"
+      ],
+      "action_items": [
+        "Track order book size and execution timelines in next quarterly disclosure"
+      ]
+    },
+    {
+      "news_id": "3bffdf108f3c",
+      "symbol": "TIMETECHNO",
+      "headline": "Time Technoplast announces strategic acquisition to expand manufacturing footprint",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Acquisition is expected to drive inorganic revenue growth and scale up its core packaging/industrial product offerings. Cash flow health remains key."
+      },
+      "price_impact": {
+        "short_term_pct_low": 2.0,
+        "short_term_pct_high": 5.0,
+        "medium_term_pct_low": 6.0,
+        "medium_term_pct_high": 12.0,
+        "rationale": "Strategic M&A is favorably viewed by markets as it accelerates market share gains and operational synergies."
+      },
+      "signal": "BUY",
+      "conviction": 7,
+      "key_risks": [
+        "Integration risks",
+        "Valuation premium paid"
+      ],
+      "key_catalysts": [
+        "Synergy realization",
+        "Margin expansion post-integration"
+      ],
+      "action_items": [
+        "Monitor debt levels post-acquisition",
+        "Assess valuation of the target asset"
+      ]
+    },
+    {
+      "news_id": "c97d897f3357",
+      "symbol": "VIKRAMSOLR",
+      "headline": "Vikram Solar announces acquisition to boost operational capacity",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "stable",
+        "debt_concern": true,
+        "commentary": "The acquisition aligns with expanding renewable energy demand and expands total manufacturing capacity. High capex required for integration could stretch balance sheet."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.0,
+        "short_term_pct_high": 4.0,
+        "medium_term_pct_low": 5.0,
+        "medium_term_pct_high": 10.0,
+        "rationale": "Capacity expansion via inorganic route boosts long-term growth story despite potential debt load."
+      },
+      "signal": "BUY",
+      "conviction": 7,
+      "key_risks": [
+        "Increase in debt-to-equity ratio",
+        "Policy changes in solar tariffs"
+      ],
+      "key_catalysts": [
+        "Ramping up production capacity",
+        "Favorable government policy execution"
+      ],
+      "action_items": [
+        "Verify financing structure of the transaction"
+      ]
+    },
+    {
+      "news_id": "e0554792781c",
+      "symbol": "PFOCUS",
+      "headline": "Prime Focus announces acquisition in media and VFX space",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "up",
+        "margin_trend": "stable",
+        "debt_concern": true,
+        "commentary": "Inorganic growth expands international service offerings, though existing debt levels require careful monitoring."
+      },
+      "price_impact": {
+        "short_term_pct_low": -1.0,
+        "short_term_pct_high": 2.5,
+        "medium_term_pct_low": 2.0,
+        "medium_term_pct_high": 6.0,
+        "rationale": "Market reaction likely mixed until clarity on transaction valuation and debt burden is provided."
+      },
+      "signal": "HOLD",
+      "conviction": 5,
+      "key_risks": [
+        "High debt metrics",
+        "Volatile global entertainment industry spending"
+      ],
+      "key_catalysts": [
+        "De-leveraging balance sheet",
+        "Margin profile improvement"
+      ],
+      "action_items": [
+        "Review debt profile post-deal completion"
+      ]
+    },
+    {
+      "news_id": "18de390a4bc2",
+      "symbol": "GICL",
+      "headline": "GICL submits clarification on financial results",
+      "event_type": "general",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Routine compliance response to stock exchange queries regarding past financial submissions with negligible fundamental impact."
+      },
+      "price_impact": {
+        "short_term_pct_low": -0.5,
+        "short_term_pct_high": 0.5,
+        "medium_term_pct_low": -1.0,
+        "medium_term_pct_high": 1.0,
+        "rationale": "Standard compliance filing expected to trigger minimal price reaction."
+      },
+      "signal": "WATCH",
+      "conviction": 4,
+      "key_risks": [
+        "Further regulatory scrutiny if disclosures are insufficient"
+      ],
+      "key_catalysts": [
+        "Improvement in core operational performance"
+      ],
+      "action_items": [
+        "Read exchange clarification details for audit findings"
+      ]
+    },
+    {
+      "news_id": "cb3d44acfd7e",
+      "symbol": "IRB",
+      "headline": "IRB Infrastructure announces strategic acquisition of road assets",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "stable",
+        "debt_concern": true,
+        "commentary": "Asset acquisition adds to toll collection portfolio, strengthening predictable long-term revenues. Capital structure needs close monitoring given infrastructure leverage."
+      },
+      "price_impact": {
+        "short_term_pct_low": 0.5,
+        "short_term_pct_high": 3.0,
+        "medium_term_pct_low": 3.0,
+        "medium_term_pct_high": 7.0,
+        "rationale": "Addition of toll income generates steady cash flow, though high debt caps aggressive upside."
+      },
+      "signal": "HOLD",
+      "conviction": 6,
+      "key_risks": [
+        "Traffic growth slowdown",
+        "Rising interest rate environment"
+      ],
+      "key_catalysts": [
+        "Higher toll collections",
+        "Refinancing debt at lower yields"
+      ],
+      "action_items": [
+        "Check cash flow yield of target road asset"
+      ]
+    },
+    {
+      "news_id": "847f3059e1a2",
+      "symbol": "SWANDEF",
+      "headline": "Swan Defence announces scheme of merger/amalgamation",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Corporate restructuring and amalgamation consolidate group defense capabilities, improving scale and operational efficiencies."
+      },
+      "price_impact": {
+        "short_term_pct_low": 3.0,
+        "short_term_pct_high": 7.0,
+        "medium_term_pct_low": 10.0,
+        "medium_term_pct_high": 18.0,
+        "rationale": "Consolidation of defense operations provides significant valuation re-rating potential in a high-growth sector."
+      },
+      "signal": "BUY",
+      "conviction": 8,
+      "key_risks": [
+        "NCLT and shareholder approval delays"
+      ],
+      "key_catalysts": [
+        "Completion of amalgamation scheme",
+        "Defense contract awards"
+      ],
+      "action_items": [
+        "Track swap ratio and NCLT approval timelines"
+      ]
+    },
+    {
+      "news_id": "11655df01b4c",
+      "symbol": "BEL",
+      "headline": "Bharat Electronics receives major defense order contracts",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Fresh order inflows further expand BEL's robust order book, providing strong revenue growth visibility for 2-3 years. Clean balance sheet supports high returns."
+      },
+      "price_impact": {
+        "short_term_pct_low": 2.5,
+        "short_term_pct_high": 5.5,
+        "medium_term_pct_low": 8.0,
+        "medium_term_pct_high": 15.0,
+        "rationale": "Consistent defense order pipeline reinforces market confidence in earnings trajectory."
+      },
+      "signal": "BUY",
+      "conviction": 9,
+      "key_risks": [
+        "Supply chain bottlenecks for component sourcing"
+      ],
+      "key_catalysts": [
+        "Quarterly order execution beats",
+        "Indigenous defense procurement push"
+      ],
+      "action_items": [
+        "Accumulate on dips near short-term support levels"
+      ]
+    },
+    {
+      "news_id": "2de5ce30fa34",
+      "symbol": "GKENERGY",
+      "headline": "GK Energy wins new order execution contracts",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Order win directly translates to near-term earnings enhancement, supporting current positive price momentum."
+      },
+      "price_impact": {
+        "short_term_pct_low": 2.0,
+        "short_term_pct_high": 6.0,
+        "medium_term_pct_low": 7.0,
+        "medium_term_pct_high": 14.0,
+        "rationale": "Positive momentum continues following strong existing trajectory and contract wins."
+      },
+      "signal": "BUY",
+      "conviction": 7,
+      "key_risks": [
+        "Execution delay risks",
+        "Raw material volatility"
+      ],
+      "key_catalysts": [
+        "Speedy project execution",
+        "Q3 financial performance"
+      ],
+      "action_items": [
+        "Evaluate order size relative to total revenue base"
+      ]
+    },
+    {
+      "news_id": "d7b4621830e4",
+      "symbol": "MOLDTECH",
+      "headline": "Mold-Tek Technologies board recommends dividend payout",
+      "event_type": "corporate_action",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Dividend announcement reflects cash flow stability and commitment to returning capital to shareholders."
+      },
+      "price_impact": {
+        "short_term_pct_low": 0.5,
+        "short_term_pct_high": 2.0,
+        "medium_term_pct_low": 1.0,
+        "medium_term_pct_high": 4.0,
+        "rationale": "Yield announcement offers minor support to share price."
+      },
+      "signal": "HOLD",
+      "conviction": 6,
+      "key_risks": [
+        "Slowdown in IT engineering services demand"
+      ],
+      "key_catalysts": [
+        "Record date announcement",
+        "U.S. client spending uptick"
+      ],
+      "action_items": [
+        "Verify dividend yield percentage and record date"
+      ]
+    },
+    {
+      "news_id": "13293c726d7d",
+      "symbol": "MOLDTECH",
+      "headline": "Mold-Tek Technologies approves bonus issue",
+      "event_type": "corporate_action",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Bonus issuance increases total share count, improving liquidity while equity fundamentals remain unchanged."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.5,
+        "short_term_pct_high": 4.5,
+        "medium_term_pct_low": 2.0,
+        "medium_term_pct_high": 6.0,
+        "rationale": "Bonus issues typically generate positive retail interest and improve liquidity."
+      },
+      "signal": "HOLD",
+      "conviction": 6,
+      "key_risks": [
+        "EPS dilution in per-share terms post-bonus"
+      ],
+      "key_catalysts": [
+        "Shareholder approval and ex-bonus date setup"
+      ],
+      "action_items": [
+        "Check bonus ratio"
+      ]
+    },
+    {
+      "news_id": "98972bc75261",
+      "symbol": "JBFIND",
+      "headline": "JBF Industries issues clarification regarding financial results",
+      "event_type": "general",
+      "fundamentals": {
+        "eps_impact": "unknown",
+        "revenue_direction": "unknown",
+        "margin_trend": "unknown",
+        "debt_concern": true,
+        "commentary": "Regulatory clarification requests often signal reporting gaps or ongoing scrutiny, warranting institutional caution."
+      },
+      "price_impact": {
+        "short_term_pct_low": -2.0,
+        "short_term_pct_high": 1.0,
+        "medium_term_pct_low": -5.0,
+        "medium_term_pct_high": 2.0,
+        "rationale": "Uncertainty surrounding exchange clarifications keeps sentiment muted."
+      },
+      "signal": "AVOID",
+      "conviction": 3,
+      "key_risks": [
+        "Governance/reporting concerns",
+        "Penny stock illiquidity"
+      ],
+      "key_catalysts": [
+        "Clear regulatory clean chit"
+      ],
+      "action_items": [
+        "Avoid fresh positions until audited clarity is achieved"
+      ]
+    },
+    {
+      "news_id": "cbb7b1cff0ef",
+      "symbol": "MOLDTKPAC",
+      "headline": "Mold-Tek Packaging declares dividend for shareholders",
+      "event_type": "corporate_action",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Consistent payout demonstrates strong operational cash flows and steady balance sheet management."
+      },
+      "price_impact": {
+        "short_term_pct_low": 0.5,
+        "short_term_pct_high": 2.5,
+        "medium_term_pct_low": 2.0,
+        "medium_term_pct_high": 5.0,
+        "rationale": "Dividend news provides moderate downside protection."
+      },
+      "signal": "HOLD",
+      "conviction": 6,
+      "key_risks": [
+        "Fluctuations in polymer raw material costs"
+      ],
+      "key_catalysts": [
+        "Volume growth in FMCG and pharma packaging segments"
+      ],
+      "action_items": [
+        "Track ex-dividend date"
+      ]
+    },
+    {
+      "news_id": "a6da2552c7f6",
+      "symbol": "MOLDTKPAC",
+      "headline": "Mold-Tek Packaging announces bonus issue",
+      "event_type": "corporate_action",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Bonus issue expands share capital base and signals management confidence in cash generation."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.0,
+        "short_term_pct_high": 4.0,
+        "medium_term_pct_low": 3.0,
+        "medium_term_pct_high": 8.0,
+        "rationale": "Bonus issue boosts retail participation and trading liquidity."
+      },
+      "signal": "HOLD",
+      "conviction": 6,
+      "key_risks": [
+        "Valuation pressure if operational earnings lag market expectations"
+      ],
+      "key_catalysts": [
+        "Execution of bonus ratio allocation"
+      ],
+      "action_items": [
+        "Monitor bonus ratio details"
+      ]
+    },
+    {
+      "news_id": "1df02afa1034",
+      "symbol": "CEIGALL",
+      "headline": "Ceigall India secures project orders in infrastructure space",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "New order inflows expand execution pipeline, driving top-line growth for upcoming quarters."
+      },
+      "price_impact": {
+        "short_term_pct_low": 2.0,
+        "short_term_pct_high": 5.0,
+        "medium_term_pct_low": 6.0,
+        "medium_term_pct_high": 12.0,
+        "rationale": "Order wins continue to sustain strong current price momentum."
+      },
+      "signal": "BUY",
+      "conviction": 7,
+      "key_risks": [
+        "Working capital intensity in EPC projects"
+      ],
+      "key_catalysts": [
+        "Execution velocity and timely project completion"
+      ],
+      "action_items": [
+        "Monitor quarterly revenue recognition from new projects"
+      ]
+    },
+    {
+      "news_id": "c6ae964d2edd",
+      "symbol": "AHLWEST",
+      "headline": "Asian Hotels (West) replies to exchange clarification regarding financial results",
+      "event_type": "general",
+      "fundamentals": {
+        "eps_impact": "neutral",
+        "revenue_direction": "flat",
+        "margin_trend": "stable",
+        "debt_concern": false,
+        "commentary": "Filing clarifies exchange inquiries regarding historical results. Limited direct operational impact."
+      },
+      "price_impact": {
+        "short_term_pct_low": -0.5,
+        "short_term_pct_high": 1.0,
+        "medium_term_pct_low": -1.0,
+        "medium_term_pct_high": 2.0,
+        "rationale": "Procedural compliance response expected to have minimal effect on underlying equity valuation."
+      },
+      "signal": "WATCH",
+      "conviction": 4,
+      "key_risks": [
+        "Corporate governance or debt restructuring overhangs"
+      ],
+      "key_catalysts": [
+        "Hotel occupancy rates and ARR trends"
+      ],
+      "action_items": [
+        "Review disclosure response text on exchange site"
+      ]
+    },
+    {
+      "news_id": "b76ac9d0a641",
+      "symbol": "SUBEXLTD",
+      "headline": "Subex receives new contract award in telecom software space",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "High-margin telecom software order enhances margin structure and stabilizes revenue growth."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.0,
+        "short_term_pct_high": 4.0,
+        "medium_term_pct_low": 4.0,
+        "medium_term_pct_high": 9.0,
+        "rationale": "New contract wins support operational turnaround efforts."
+      },
+      "signal": "BUY",
+      "conviction": 6,
+      "key_risks": [
+        "Contract renewal risk",
+        "Telecom operator spending cuts"
+      ],
+      "key_catalysts": [
+        "SaaS revenue mix increase",
+        "Quarterly margin expansion"
+      ],
+      "action_items": [
+        "Track software deployment milestones"
+      ]
+    },
+    {
+      "news_id": "1cc5df75a5a2",
+      "symbol": "MTARTECH",
+      "headline": "MTAR Technologies bags high-value orders in clean energy & defense",
+      "event_type": "new_order",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Specialized engineering order intake boosts earnings trajectory and improves high-margin revenue contribution."
+      },
+      "price_impact": {
+        "short_term_pct_low": 2.0,
+        "short_term_pct_high": 6.0,
+        "medium_term_pct_low": 7.0,
+        "medium_term_pct_high": 15.0,
+        "rationale": "Strong order book visibility supports high growth valuations."
+      },
+      "signal": "BUY",
+      "conviction": 8,
+      "key_risks": [
+        "Customer concentration risk",
+        "Execution delay in specialized components"
+      ],
+      "key_catalysts": [
+        "Ramp up in export orders",
+        "Margin delivery in coming quarters"
+      ],
+      "action_items": [
+        "Accumulate on market corrections"
+      ]
+    },
+    {
+      "news_id": "18a5d18d4001",
+      "symbol": "SHRIPISTON",
+      "headline": "Shriram Pistons announces strategic acquisition to expand auto component offerings",
+      "event_type": "ma_event",
+      "fundamentals": {
+        "eps_impact": "positive",
+        "revenue_direction": "up",
+        "margin_trend": "expanding",
+        "debt_concern": false,
+        "commentary": "Strategic acquisition enhances product capabilities for EV and hybrid transitions, expanding total addressable market with manageable balance sheet impact."
+      },
+      "price_impact": {
+        "short_term_pct_low": 1.5,
+        "short_term_pct_high": 4.5,
+        "medium_term_pct_low": 5.0,
+        "medium_term_pct_high": 11.0,
+        "rationale": "Proactive M&A for EV/hybrid readiness acts as a multi-year growth catalyst for auto component leaders."
+      },
+      "signal": "BUY",
+      "conviction": 8,
+      "key_risks": [
+        "Auto industry cyclicality",
+        "Integration timeline risks"
+      ],
+      "key_catalysts": [
+        "Completion of acquisition formalities",
+        "Synergies in EV component supply chain"
+      ],
+      "action_items": [
+        "Review target acquisition valuation metrics"
+      ]
+    }
+  ],
+  "market_summary": "The broader market reflects positive momentum driven by strong order wins in defense, capital goods, and infrastructure alongside active M&A activity across industrial sectors. Capital deployment via strategic acquisitions and corporate actions (bonus/dividends) highlights corporate confidence in mid-to-long term earnings visibility.",
+  "top_pick": "BEL",
+  "top_pick_reason": "Bharat Electronics displays superior earnings visibility driven by constant defense order inflows, combined with an outstanding balance sheet and strong sovereign tailwinds.",
+  "prices": {
+    "AHLWEST": {
+      "symbol": "AHLWEST",
+      "price": 535.5999755859375,
+      "prev_close": 532.2999877929688,
+      "change_pct": 0.62,
+      "52w_high": 751.4,
+      "52w_low": 137.0,
+      "currency": "INR"
+    },
+    "BEL": {
+      "symbol": "BEL",
+      "price": 406.8999938964844,
+      "prev_close": 413.25,
+      "change_pct": -1.54,
+      "52w_high": 473.45,
+      "52w_low": 361.2,
+      "currency": "INR"
+    },
+    "CEIGALL": {
+      "symbol": "CEIGALL",
+      "price": 337.8500061035156,
+      "prev_close": 324.3500061035156,
+      "change_pct": 4.16,
+      "52w_high": 405.7,
+      "52w_low": 222.61,
+      "currency": "INR"
+    },
+    "GICL": {
+      "symbol": "GICL",
+      "price": 23.75,
+      "prev_close": 23.889999389648438,
+      "change_pct": -0.59,
+      "52w_high": 169.95,
+      "52w_low": 15.61,
+      "currency": "INR"
+    },
+    "GKENERGY": {
+      "symbol": "GKENERGY",
+      "price": 133.82000732421875,
+      "prev_close": 126.19000244140625,
+      "change_pct": 6.05,
+      "52w_high": 239.6,
+      "52w_low": 87.2,
+      "currency": "INR"
+    },
+    "IRB": {
+      "symbol": "IRB",
+      "price": 18.809999465942383,
+      "prev_close": 18.90999984741211,
+      "change_pct": -0.53,
+      "52w_high": 23.95,
+      "52w_low": 18.76,
+      "currency": "INR"
+    },
+    "JBFIND": {
+      "symbol": "JBFIND",
+      "price": null,
+      "prev_close": null,
+      "change_pct": null,
+      "52w_high": 4.3,
+      "52w_low": 4.3,
+      "currency": "INR"
+    },
+    "JNPR": {
+      "symbol": "JNPR",
+      "price": 267.44000244140625,
+      "prev_close": 258.9599914550781,
+      "change_pct": 3.27,
+      "52w_high": 281.89,
+      "52w_low": 232.11,
+      "currency": "INR"
+    },
+    "MOLDTECH": {
+      "symbol": "MOLDTECH",
+      "price": 191.5399932861328,
+      "prev_close": 193.6199951171875,
+      "change_pct": -1.07,
+      "52w_high": 221.0,
+      "52w_low": 101.1,
+      "currency": "INR"
+    },
+    "MOLDTKPAC": {
+      "symbol": "MOLDTKPAC",
+      "price": 706.7999877929688,
+      "prev_close": 716.25,
+      "change_pct": -1.32,
+      "52w_high": 870.5,
+      "52w_low": 464.9,
+      "currency": "INR"
+    },
+    "MTARTECH": {
+      "symbol": "MTARTECH",
+      "price": 6928.5,
+      "prev_close": 6812.0,
+      "change_pct": 1.71,
+      "52w_high": 8714.0,
+      "52w_low": 1390.5,
+      "currency": "INR"
+    },
+    "PFOCUS": {
+      "symbol": "PFOCUS",
+      "price": 302.54998779296875,
+      "prev_close": 302.75,
+      "change_pct": -0.07,
+      "52w_high": 367.0,
+      "52w_low": 139.04,
+      "currency": "INR"
+    },
+    "SHRIPISTON": {
+      "symbol": "SHRIPISTON",
+      "price": 4610.0,
+      "prev_close": 4629.89990234375,
+      "change_pct": -0.43,
+      "52w_high": 4785.8,
+      "52w_low": 2485.0,
+      "currency": "INR"
+    },
+    "SUBEXLTD": {
+      "symbol": "SUBEXLTD",
+      "price": 17.6200008392334,
+      "prev_close": 17.81999969482422,
+      "change_pct": -1.12,
+      "52w_high": 19.39,
+      "52w_low": 6.61,
+      "currency": "INR"
+    },
+    "SWANDEF": {
+      "symbol": "SWANDEF",
+      "price": 2333.800048828125,
+      "prev_close": 2330.699951171875,
+      "change_pct": 0.13,
+      "52w_high": 2750.0,
+      "52w_low": 390.8,
+      "currency": "INR"
+    },
+    "TIMETECHNO": {
+      "symbol": "TIMETECHNO",
+      "price": 184.83999633789062,
+      "prev_close": 185.0500030517578,
+      "change_pct": -0.11,
+      "52w_high": 249.15,
+      "52w_low": 154.0,
+      "currency": "INR"
+    },
+    "VIKRAMSOLR": {
+      "symbol": "VIKRAMSOLR",
+      "price": 171.85000610351562,
+      "prev_close": 169.99000549316406,
+      "change_pct": 1.09,
+      "52w_high": 407.95,
+      "52w_low": 155.38,
+      "currency": "INR"
+    }
+  },
+  "generated_at": "2026-08-27T08:49:36.716793+05:30",
+  "ai_model": "gemini-3.6-flash"
+}
