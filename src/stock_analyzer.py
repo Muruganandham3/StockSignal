@@ -24,7 +24,7 @@ INPUT_FILE  = Path("data/news_raw.json")
 OUTPUT_FILE = Path("data/analysis.json")
 
 # ── Model config ──────────────────────────────────────────────────────────────
-GEMINI_MODEL   = "gemini-2.0-flash"          # ✅ correct free-tier model name
+GEMINI_MODEL   = "gemini-1.5-flash"          # ✅ stable free-tier model, widely available
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent?key={key}"
