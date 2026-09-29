@@ -1,42 +1,65 @@
 """
-stock_analyzer.py — Gemini free tier, auto model discovery + 503 fallback
+stock_analyzer.py
+Gemini-powered Indian stock news analyzer.
+
+Uses ONE Gemini model.
+No fallback models.
+No model retry chain.
 """
 
 import json
 import logging
 import os
-import time
 from pathlib import Path
 
 import requests
 
-log = logging.getLogger(__name__)
 
-INPUT_FILE  = Path("data/news_raw.json")
+# ============================================================
+# CONFIG
+# ============================================================
+
+INPUT_FILE = Path("data/news_raw.json")
 OUTPUT_FILE = Path("data/analysis.json")
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-PREFERRED_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-]
+# Use one model only.
+# Change this ONLY if your API key does not support it.
+GEMINI_MODEL = "gemini-2.5-flash"
 
 BATCH_SIZE = 10
 
-SYSTEM_PROMPT = """You are a senior equity research analyst for Indian stock markets (NSE/BSE).
-Analyze the news items and return ONLY a valid JSON object.
-No markdown, no explanation, no ```json fences. Start with { and end with }.
-Keep every text field to ONE sentence to avoid truncation.
+
+# ============================================================
+# PROMPT
+# ============================================================
+
+SYSTEM_PROMPT = """
+You are a senior equity research analyst for Indian stock markets
+(NSE/BSE).
+
+Analyze the supplied news items.
+
+Return ONLY one valid JSON object.
+Do NOT return markdown.
+Do NOT return ```json.
+Do NOT add explanations outside JSON.
+
+Keep every text field to ONE short sentence.
 
 JSON schema:
+
 {
   "analyses": [
     {
       "news_id": "string",
       "symbol": "string or null",
       "headline": "one short sentence",
-      "event_type": "quarterly_result|new_order|bulk_deal|corporate_action|ma_event|general",
+
+      "event_type":
+        "quarterly_result|new_order|bulk_deal|corporate_action|ma_event|general",
+
       "fundamentals": {
         "eps_impact": "positive|negative|neutral|unknown",
         "revenue_direction": "up|down|flat|unknown",
@@ -44,243 +67,484 @@ JSON schema:
         "debt_concern": false,
         "commentary": "one sentence"
       },
+
       "price_impact": {
-        "short_term_pct_low": 0,
-        "short_term_pct_high": 0,
-        "medium_term_pct_low": 0,
-        "medium_term_pct_high": 0,
+        "direction": "positive|negative|neutral|unknown",
+        "strength": "high|medium|low|unknown",
+        "time_horizon": "intraday|short_term|medium_term|unknown",
         "rationale": "one sentence"
       },
+
       "signal": "BUY|HOLD|WATCH|AVOID",
       "conviction": 5,
-      "key_risks": ["short phrase"],
-      "key_catalysts": ["short phrase"],
-      "action_items": ["short phrase"]
+
+      "key_risks": [
+        "short phrase"
+      ],
+
+      "key_catalysts": [
+        "short phrase"
+      ],
+
+      "action_items": [
+        "short phrase"
+      ]
     }
   ],
+
   "market_summary": "one sentence",
+
   "top_pick": "SYMBOL or null",
+
   "top_pick_reason": "one sentence"
-}"""
+}
+"""
 
 
-def get_available_models(api_key: str) -> list:
-    url  = f"{GEMINI_BASE}/models?key={api_key}"
-    resp = requests.get(url, timeout=15)
-    if resp.status_code == 403:
-        log.error(
-            "403 Forbidden — API key has no Gemini access.\n"
-            "Get a free key from: https://aistudio.google.com/app/apikey\n"
-            "Then update GitHub Secret: GEMINI_API_KEY"
-        )
-        raise SystemExit(1)
-    resp.raise_for_status()
-    return [m["name"].replace("models/", "") for m in resp.json().get("models", [])]
+# ============================================================
+# GEMINI API
+# ============================================================
 
+def call_gemini(prompt: str, api_key: str) -> str:
+    """
+    Call exactly one Gemini model.
 
-def pick_model(available: list) -> list:
-    """Return ordered list of models to try, best first."""
-    chosen = []
-    for p in PREFERRED_MODELS:
-        if p in available:
-            chosen.append(p)
-    # Add any remaining available flash models not in our list
-    for m in available:
-        if "flash" in m and m not in chosen:
-            chosen.append(m)
-    if not chosen:
-        chosen = [m for m in available if "gemini" in m]
-    log.info("Models to try (in order): %s", chosen[:5])
-    return chosen
+    No fallback.
+    No retry.
+    """
 
+    url = (
+        f"{GEMINI_BASE}/models/"
+        f"{GEMINI_MODEL}:generateContent"
+        f"?key={api_key}"
+    )
 
-def build_prompt(news_items: list, prices: dict, generated_at: str, mode: str) -> str:
-    lines = [SYSTEM_PROMPT, "", f"Date: {generated_at} | Mode: {mode}", "", "=== NEWS ITEMS ==="]
-    for item in news_items:
-        lines.append(
-            f"\n[{item['id']}] ({item['type'].upper()}) {item['title']}\n"
-            f"Symbols: {', '.join(item.get('symbols', [])) or 'N/A'}\n"
-            f"Summary: {item['summary'][:200]}"
-        )
-    if prices:
-        lines.append("\n=== PRICES ===")
-        for sym, p in list(prices.items())[:20]:
-            chg = f"{p['change_pct']:+.2f}%" if p.get("change_pct") is not None else "N/A"
-            lines.append(f"{sym}: ₹{p.get('price','N/A')} ({chg})")
-    lines.append("\nReturn ONLY the JSON object.")
-    return "\n".join(lines)
-
-
-def call_gemini(prompt: str, model: str, api_key: str) -> str:
-    """Call one model. Raises on 400/404. Returns text on success. Raises on 503 after retries."""
-    url = f"{GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
         "generationConfig": {
-            "temperature":      0.1,
-            "maxOutputTokens":  8192,
-            "responseMimeType": "application/json",
-        },
+            "temperature": 0.1,
+            "maxOutputTokens": 8192,
+            "responseMimeType": "application/json"
+        }
     }
 
-    for attempt in range(1, 4):
-        try:
-            resp = requests.post(url, json=payload, timeout=120)
+    log.info("Calling Gemini model: %s", GEMINI_MODEL)
 
-            # 503 = overloaded, retry with backoff
-            if resp.status_code == 503:
-                wait = 15 * attempt
-                log.warning("503 Service Unavailable for %s — waiting %ds (attempt %d/3)", model, wait, attempt)
-                time.sleep(wait)
-                continue
+    response = requests.post(
+        url,
+        json=payload,
+        timeout=120
+    )
 
-            # 429 = rate limited, retry with backoff
-            if resp.status_code == 429:
-                wait = 20 * attempt
-                log.warning("429 Rate limited for %s — waiting %ds (attempt %d/3)", model, wait, attempt)
-                time.sleep(wait)
-                continue
+    # --------------------------------------------------------
+    # Error handling
+    # --------------------------------------------------------
 
-            # 400 / 404 = model doesn't support this request → caller should try next model
-            if resp.status_code in (400, 404):
-                log.warning("HTTP %d for model %s — will try next model", resp.status_code, model)
-                raise ValueError(f"MODEL_UNSUPPORTED:{resp.status_code}")
+    if response.status_code != 200:
 
-            resp.raise_for_status()
-            data = resp.json()
+        log.error(
+            "Gemini API error: HTTP %s",
+            response.status_code
+        )
 
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("No candidates in response")
+        log.error(
+            "Gemini response: %s",
+            response.text[:2000]
+        )
 
-            finish_reason = candidates[0].get("finishReason", "")
-            if finish_reason == "MAX_TOKENS":
-                raise ValueError("MAX_TOKENS")
+        response.raise_for_status()
 
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if not parts:
-                raise ValueError("Empty parts in response")
+    data = response.json()
 
-            return parts[0]["text"].strip()
+    candidates = data.get("candidates", [])
 
-        except ValueError:
-            raise   # propagate to caller
-        except requests.exceptions.RequestException as e:
-            log.warning("Request error attempt %d/3 for %s: %s", attempt, model, e)
-            if attempt == 3:
-                raise
-            time.sleep(10)
+    if not candidates:
+        raise RuntimeError(
+            "Gemini returned no candidates"
+        )
 
-    raise RuntimeError(f"All retries exhausted for model {model}")
+    candidate = candidates[0]
 
+    finish_reason = candidate.get(
+        "finishReason",
+        ""
+    )
+
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError(
+            "Gemini response exceeded MAX_OUTPUT_TOKENS"
+        )
+
+    content = candidate.get(
+        "content",
+        {}
+    )
+
+    parts = content.get(
+        "parts",
+        []
+    )
+
+    if not parts:
+        raise RuntimeError(
+            "Gemini returned empty content"
+        )
+
+    text = parts[0].get(
+        "text",
+        ""
+    )
+
+    if not text:
+        raise RuntimeError(
+            "Gemini returned empty text"
+        )
+
+    return text.strip()
+
+
+# ============================================================
+# JSON CLEANING
+# ============================================================
 
 def clean_json(raw: str) -> str:
+    """
+    Remove accidental markdown fences if Gemini returns them.
+    """
+
     raw = raw.strip()
+
     if raw.startswith("```"):
-        raw = raw[raw.index("\n") + 1:]
+        first_newline = raw.find("\n")
+
+        if first_newline != -1:
+            raw = raw[first_newline + 1:]
+
     if raw.endswith("```"):
-        raw = raw[:raw.rfind("```")]
+        raw = raw[:-3]
+
     return raw.strip()
 
 
-def call_with_fallback(prompt: str, models: list, api_key: str) -> str:
-    """Try each model in order until one works."""
-    last_err = None
-    for model in models:
-        try:
-            log.info("Trying model: %s", model)
-            text = call_gemini(prompt, model, api_key)
-            log.info("Success with model: %s", model)
-            return text, model
-        except ValueError as e:
-            if "MODEL_UNSUPPORTED" in str(e):
-                log.warning("Model %s unsupported, trying next...", model)
-                last_err = e
-                continue
-            raise   # MAX_TOKENS or other ValueError
-        except Exception as e:
-            log.warning("Model %s failed (%s), trying next...", model, e)
-            last_err = e
-            continue
+# ============================================================
+# PROMPT BUILDER
+# ============================================================
 
-    raise RuntimeError(f"All models failed. Last error: {last_err}")
+def build_prompt(
+    news_items: list,
+    prices: dict,
+    generated_at: str,
+    mode: str
+) -> str:
+
+    lines = [
+        SYSTEM_PROMPT,
+        "",
+        f"Date: {generated_at}",
+        f"Mode: {mode}",
+        "",
+        "=== NEWS ITEMS ==="
+    ]
+
+    for item in news_items:
+
+        symbols = ", ".join(
+            item.get("symbols", [])
+        )
+
+        if not symbols:
+            symbols = "N/A"
+
+        summary = item.get(
+            "summary",
+            ""
+        )[:250]
+
+        lines.append(
+            f"""
+[{item.get('id', '')}]
+Type: {item.get('type', '').upper()}
+Title: {item.get('title', '')}
+Symbols: {symbols}
+Summary: {summary}
+"""
+        )
+
+    if prices:
+
+        lines.append(
+            "\n=== CURRENT PRICES ==="
+        )
+
+        for symbol, price_data in list(
+            prices.items()
+        )[:30]:
+
+            price = price_data.get(
+                "price",
+                "N/A"
+            )
+
+            change_pct = price_data.get(
+                "change_pct"
+            )
+
+            if change_pct is None:
+                change = "N/A"
+            else:
+                change = f"{change_pct:+.2f}%"
+
+            lines.append(
+                f"{symbol}: ₹{price} ({change})"
+            )
+
+    lines.append(
+        "\nReturn ONLY the JSON object."
+    )
+
+    return "\n".join(lines)
 
 
-def analyze_batch(items: list, prices: dict, generated_at: str, mode: str, models: list, api_key: str):
-    prompt = build_prompt(items, prices, generated_at, mode)
-    log.info("Sending %d chars for %d items...", len(prompt), len(items))
-    raw, used_model = call_with_fallback(prompt, models, api_key)
-    result = json.loads(clean_json(raw))
-    return result.get("analyses", []), result, used_model
+# ============================================================
+# ANALYZE BATCH
+# ============================================================
 
+def analyze_batch(
+    items: list,
+    prices: dict,
+    generated_at: str,
+    mode: str,
+    api_key: str
+):
+
+    prompt = build_prompt(
+        items,
+        prices,
+        generated_at,
+        mode
+    )
+
+    log.info(
+        "Sending %d characters for %d news items",
+        len(prompt),
+        len(items)
+    )
+
+    raw = call_gemini(
+        prompt,
+        api_key
+    )
+
+    cleaned = clean_json(raw)
+
+    try:
+
+        result = json.loads(
+            cleaned
+        )
+
+    except json.JSONDecodeError as exc:
+
+        log.error(
+            "Gemini returned invalid JSON"
+        )
+
+        log.error(
+            "Raw response: %s",
+            raw[:5000]
+        )
+
+        raise exc
+
+    analyses = result.get(
+        "analyses",
+        []
+    )
+
+    return analyses, result
+
+
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
 
 def run_analysis(news_data: dict) -> dict:
-    api_key      = os.environ["GEMINI_API_KEY"]
-    available    = get_available_models(api_key)
-    log.info("Available models: %s", available)
-    models       = pick_model(available)
 
-    if not models:
-        raise RuntimeError("No usable Gemini models found for this API key")
+    api_key = os.environ.get(
+        "GEMINI_API_KEY"
+    )
 
-    news_items   = news_data.get("news", [])
-    prices       = news_data.get("prices", {})
-    generated_at = news_data.get("generated_at", "")
-    mode         = news_data.get("mode", "")
+    if not api_key:
+
+        raise RuntimeError(
+            "GEMINI_API_KEY environment variable is missing"
+        )
+
+    news_items = news_data.get(
+        "news",
+        []
+    )
+
+    prices = news_data.get(
+        "prices",
+        {}
+    )
+
+    generated_at = news_data.get(
+        "generated_at",
+        ""
+    )
+
+    mode = news_data.get(
+        "mode",
+        ""
+    )
 
     all_analyses = []
-    last_result  = {}
-    used_model   = models[0]
 
-    for i in range(0, len(news_items), BATCH_SIZE):
-        batch = news_items[i: i + BATCH_SIZE]
-        log.info("Batch %d–%d of %d...", i + 1, i + len(batch), len(news_items))
-        try:
-            analyses, result, used_model = analyze_batch(batch, prices, generated_at, mode, models, api_key)
-            all_analyses.extend(analyses)
-            last_result = result
+    last_result = {}
 
-        except ValueError as e:
-            if "MAX_TOKENS" in str(e):
-                log.warning("MAX_TOKENS — retrying in sub-batches of 5...")
-                for j in range(0, len(batch), 5):
-                    sub = batch[j: j + 5]
-                    try:
-                        analyses, result, used_model = analyze_batch(sub, prices, generated_at, mode, models, api_key)
-                        all_analyses.extend(analyses)
-                        last_result = result
-                    except Exception as sub_e:
-                        log.error("Sub-batch failed, skipping: %s", sub_e)
-            else:
-                raise
+    total = len(news_items)
 
-        except json.JSONDecodeError as e:
-            log.error("JSON parse error for batch %d — skipping: %s", i, e)
-            continue
+    for i in range(
+        0,
+        total,
+        BATCH_SIZE
+    ):
+
+        batch = news_items[
+            i:i + BATCH_SIZE
+        ]
+
+        log.info(
+            "Batch %d-%d of %d",
+            i + 1,
+            i + len(batch),
+            total
+        )
+
+        analyses, result = analyze_batch(
+            batch,
+            prices,
+            generated_at,
+            mode,
+            api_key
+        )
+
+        all_analyses.extend(
+            analyses
+        )
+
+        last_result = result
 
     return {
-        "analyses":        all_analyses,
-        "market_summary":  last_result.get("market_summary", "Market data processed."),
-        "top_pick":        last_result.get("top_pick"),
-        "top_pick_reason": last_result.get("top_pick_reason", ""),
-        "prices":          prices,
-        "generated_at":    generated_at,
-        "ai_model":        used_model,
+        "analyses": all_analyses,
+
+        "market_summary": last_result.get(
+            "market_summary",
+            "Market data processed."
+        ),
+
+        "top_pick": last_result.get(
+            "top_pick"
+        ),
+
+        "top_pick_reason": last_result.get(
+            "top_pick_reason",
+            ""
+        ),
+
+        "prices": prices,
+
+        "generated_at": generated_at,
+
+        "ai_model": GEMINI_MODEL
     }
 
 
-def main():
-    if not INPUT_FILE.exists():
-        log.error("No input at %s. Run news_fetcher.py first.", INPUT_FILE)
-        return
-    news_data = json.loads(INPUT_FILE.read_text())
-    log.info("Analyzing %d news items...", news_data.get("news_count", 0))
-    result = run_analysis(news_data)
-    OUTPUT_FILE.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-    log.info("Done — %d items. Model used: %s. Top pick: %s",
-             len(result.get("analyses", [])), result.get("ai_model"), result.get("top_pick", "none"))
+# ============================================================
+# MAIN
+# ============================================================
 
+def main():
+
+    if not INPUT_FILE.exists():
+
+        log.error(
+            "Input file not found: %s",
+            INPUT_FILE
+        )
+
+        return
+
+    log.info(
+        "Reading news from %s",
+        INPUT_FILE
+    )
+
+    news_data = json.loads(
+        INPUT_FILE.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    news_count = news_data.get(
+        "news_count",
+        len(news_data.get("news", []))
+    )
+
+    log.info(
+        "Analyzing %d news items...",
+        news_count
+    )
+
+    result = run_analysis(
+        news_data
+    )
+
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    OUTPUT_FILE.write_text(
+        json.dumps(
+            result,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+    log.info(
+        "Done — %d items. Model used: %s. Top pick: %s",
+        len(result.get("analyses", [])),
+        result.get("ai_model"),
+        result.get("top_pick", "none")
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s "
+            "[%(levelname)s] "
+            "%(message)s"
+        )
+    )
+
     main()
