@@ -2,14 +2,12 @@
 # Stock Morning Digest — GitHub Actions workflow
 #
 # Schedule: 02:00 UTC = 07:30 IST, Mon–Fri
-# Cost: FREE (GitHub Actions free tier = 2,000 min/month for public
-#        repos, 500 min for private; this job uses ~3-4 min/day)
 #
-# Required GitHub Secrets (Settings → Secrets → Actions):
-#   GEMINI_API_KEY   — FREE from https://aistudio.google.com/app/apikey
-#   GMAIL_USER       — yourname@gmail.com
-#   GMAIL_APP_PASS   — 16-char Gmail App Password
-#   RECIPIENT_EMAIL  — who gets the email (can be same as GMAIL_USER)
+# Required GitHub Secrets:
+#   OPENAI_API_KEY    — OpenAI API key
+#   GMAIL_USER        — yourname@gmail.com
+#   GMAIL_APP_PASS    — 16-char Gmail App Password
+#   RECIPIENT_EMAIL   — who gets the email
 # ─────────────────────────────────────────────────────────────────
 
 name: Stock Morning Digest
@@ -17,7 +15,7 @@ name: Stock Morning Digest
 on:
   schedule:
     - cron: "0 2 * * 1-5"   # 07:30 IST, Monday–Friday
-  workflow_dispatch:          # Allow manual trigger from GitHub UI
+  workflow_dispatch:         # Allow manual trigger from GitHub UI
 
 jobs:
   digest:
@@ -25,9 +23,11 @@ jobs:
     timeout-minutes: 15
 
     steps:
+
       # ── 1. Checkout ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+
 
       # ── 2. Python ────────────────────────────────────────────────
       - name: Set up Python 3.11
@@ -36,36 +36,46 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
 
-      # ── 3. Create data directory ─────────────────────────────────
+      # ── 3. Install dependencies ─────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install openai
+
+
+      # ── 4. Create data directory ─────────────────────────────────
       - name: Create data directory
         run: mkdir -p data
 
-      # ── 4. Fetch news ────────────────────────────────────────────
+
+      # ── 5. Fetch news & prices ───────────────────────────────────
       - name: Fetch news & prices
         run: python src/news_fetcher.py
         env:
           PYTHONPATH: src
 
-      # ── 5. AI analysis ───────────────────────────────────────────
-      - name: Analyze with Claude
+
+      # ── 6. AI analysis with OpenAI ───────────────────────────────
+      - name: Analyze with OpenAI
         run: python src/stock_analyzer.py
         env:
           PYTHONPATH: src
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # ── 6. Send email ────────────────────────────────────────────
+
+      # ── 7. Send email ────────────────────────────────────────────
       - name: Send morning digest email
         run: python src/email_sender.py
         env:
           PYTHONPATH: src
-          GMAIL_USER:        ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASS:    ${{ secrets.GMAIL_APP_PASS }}
-          RECIPIENT_EMAIL:   ${{ secrets.RECIPIENT_EMAIL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
 
-      # ── 7. Upload analysis artifact (viewable in GitHub UI) ──────
+
+      # ── 8. Upload analysis artifact ──────────────────────────────
       - name: Upload analysis artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,28 +84,47 @@ jobs:
           path: data/
           retention-days: 7
 
-      # ── 8. Notify on failure ─────────────────────────────────────
+
+      # ── 9. Notify on failure ────────────────────────────────────
       - name: Send failure notification
         if: failure()
         run: |
           python - <<'EOF'
-          import smtplib, os
+          import smtplib
+          import os
           from email.mime.text import MIMEText
+
           msg = MIMEText(
             "Stock Digest workflow failed. Check GitHub Actions logs.\n\n"
-            f"Run ID: {os.environ.get('GITHUB_RUN_ID','?')}\n"
-            f"Repo:   {os.environ.get('GITHUB_REPOSITORY','?')}"
+            f"Run ID: {os.environ.get('GITHUB_RUN_ID', '?')}\n"
+            f"Repo:   {os.environ.get('GITHUB_REPOSITORY', '?')}"
           )
-          msg['Subject'] = '⚠️ Stock Digest — workflow failed'
-          msg['From']    = os.environ['GMAIL_USER']
-          msg['To']      = os.environ.get('RECIPIENT_EMAIL', os.environ['GMAIL_USER'])
-          with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
-              s.login(os.environ['GMAIL_USER'], os.environ['GMAIL_APP_PASS'])
+
+          msg["Subject"] = "⚠️ Stock Digest — workflow failed"
+          msg["From"] = os.environ["GMAIL_USER"]
+          msg["To"] = os.environ.get(
+              "RECIPIENT_EMAIL",
+              os.environ["GMAIL_USER"]
+          )
+
+          with smtplib.SMTP_SSL(
+              "smtp.gmail.com",
+              465
+          ) as s:
+
+              s.login(
+                  os.environ["GMAIL_USER"],
+                  os.environ["GMAIL_APP_PASS"]
+              )
+
               s.send_message(msg)
+
           print("Failure notification sent")
           EOF
+
         env:
-          GMAIL_USER:      ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+
         continue-on-error: true
