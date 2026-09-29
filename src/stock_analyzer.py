@@ -18,18 +18,8 @@ OUTPUT_FILE = Path("data/analysis.json")
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 PREFERRED_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-flash-latest",
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-pro-latest",
-    "gemini-pro",
 ]
 
 BATCH_SIZE = 10
