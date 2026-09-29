@@ -349,8 +349,6 @@ def call_openai(
 
                 input=prompt,
 
-                temperature=0.2,
-
                 max_output_tokens=32768,
             )
 
