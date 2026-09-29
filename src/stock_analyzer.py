@@ -1,15 +1,15 @@
 """
 stock_analyzer.py
 
-Sends fetched news + price data to OpenAI
-and returns structured stock analysis.
+Sends all fetched news + price data to Google Gemini API.
 
+Configuration:
+- Gemini only
 - Single API request
-- No fallback model
+- No fallback
 - No batching
-- All news items sent in one request
-- JSON output
-- Automatic retry for temporary API errors
+- JSON response
+- Free-tier compatible
 """
 
 import json
@@ -18,7 +18,8 @@ import os
 import time
 from pathlib import Path
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 
 # =============================================================================
@@ -42,12 +43,14 @@ OUTPUT_FILE = Path("data/analysis.json")
 
 
 # =============================================================================
-# OPENAI CONFIG
+# GEMINI CONFIG
 # =============================================================================
 
-OPENAI_MODEL = "gpt-5.6-luna"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 MAX_RETRIES = 3
+
+MAX_OUTPUT_TOKENS = 16384
 
 
 # =============================================================================
@@ -55,8 +58,8 @@ MAX_RETRIES = 3
 # =============================================================================
 
 SYSTEM_PROMPT = """
-You are a senior equity research analyst specializing in Indian stock markets
-(NSE/BSE).
+You are a senior equity research analyst specializing in Indian stock
+markets (NSE/BSE).
 
 You receive raw news items and current price data.
 
@@ -94,16 +97,15 @@ IMPORTANT RULES:
 - Analyze every news item.
 - Do not skip news items.
 - Do not invent facts.
-- Base analysis on the supplied news and price data.
-- Keep the analysis concise.
+- Base analysis on supplied news and price data.
+- Keep each analysis concise.
 - key_risks: maximum 3 items.
 - key_catalysts: maximum 3 items.
 - action_items: maximum 3 items.
 - Do not repeat the complete news article.
-- Do not provide explanations outside the JSON.
-- Return valid JSON only.
+- Return ONLY valid JSON.
 
-The response MUST follow this structure:
+JSON STRUCTURE:
 
 {
   "analyses": [
@@ -111,27 +113,43 @@ The response MUST follow this structure:
       "news_id": "string",
       "symbol": "string or null",
       "headline": "string",
-      "event_type": "quarterly_result | new_order | bulk_deal | corporate_action | ma_event | general",
+
+      "event_type":
+        "quarterly_result | new_order | bulk_deal | corporate_action | ma_event | general",
 
       "fundamentals": {
-        "eps_impact": "positive | negative | neutral | unknown",
-        "revenue_direction": "up | down | flat | unknown",
-        "margin_trend": "expanding | contracting | stable | unknown",
-        "debt_concern": true,
-        "commentary": "short analysis"
+        "eps_impact":
+          "positive | negative | neutral | unknown",
+
+        "revenue_direction":
+          "up | down | flat | unknown",
+
+        "margin_trend":
+          "expanding | contracting | stable | unknown",
+
+        "debt_concern":
+          true,
+
+        "commentary":
+          "short concise analysis"
       },
 
       "price_impact": {
         "short_term_pct_low": 0,
         "short_term_pct_high": 0,
+
         "medium_term_pct_low": 0,
         "medium_term_pct_high": 0,
-        "rationale": "short rationale"
+
+        "rationale":
+          "short concise rationale"
       },
 
-      "signal": "BUY | HOLD | WATCH | AVOID",
+      "signal":
+        "BUY | HOLD | WATCH | AVOID",
 
-      "conviction": 1,
+      "conviction":
+        1,
 
       "key_risks": [
         "risk"
@@ -147,12 +165,17 @@ The response MUST follow this structure:
     }
   ],
 
-  "market_summary": "2-3 sentence overall market tone for the day",
+  "market_summary":
+    "2-3 sentence overall market tone for the day",
 
-  "top_pick": "symbol or null",
+  "top_pick":
+    "symbol or null",
 
-  "top_pick_reason": "1 sentence"
+  "top_pick_reason":
+    "1 sentence"
 }
+
+Return ONLY valid JSON.
 """
 
 
@@ -194,7 +217,7 @@ def build_prompt(news_data: dict) -> str:
     ]
 
     # -------------------------------------------------------------------------
-    # NEWS
+    # NEWS ITEMS
     # -------------------------------------------------------------------------
 
     for item in news_items:
@@ -231,7 +254,7 @@ Summary:
         )
 
     # -------------------------------------------------------------------------
-    # PRICES
+    # CURRENT PRICES
     # -------------------------------------------------------------------------
 
     lines.append(
@@ -287,11 +310,11 @@ CURRENT PRICES
 FINAL INSTRUCTIONS
 ==================================================
 
-Analyze every news item above.
+Analyze ALL news items.
 
-Return exactly one analysis object for every news item.
+Return exactly ONE analysis object for EVERY news item.
 
-Keep each analysis concise.
+Keep the response concise.
 
 Maximum:
 - key_risks: 3
@@ -306,25 +329,62 @@ Return ONLY valid JSON.
 
 
 # =============================================================================
-# CALL OPENAI
+# CLEAN JSON
 # =============================================================================
 
-def call_openai(
+def clean_json_response(
+    raw: str,
+) -> str:
+
+    raw = raw.strip()
+
+    if raw.startswith(
+        "```json"
+    ):
+
+        raw = raw[
+            len("```json"):
+        ]
+
+    elif raw.startswith(
+        "```"
+    ):
+
+        raw = raw[
+            len("```"):
+        ]
+
+    if raw.endswith(
+        "```"
+    ):
+
+        raw = raw[
+            :-len("```")
+        ]
+
+    return raw.strip()
+
+
+# =============================================================================
+# CALL GEMINI
+# =============================================================================
+
+def call_gemini(
     prompt: str,
     retries: int = MAX_RETRIES,
 ) -> str:
 
     api_key = os.environ.get(
-        "OPENAI_API_KEY"
+        "GEMINI_API_KEY"
     )
 
     if not api_key:
 
         raise ValueError(
-            "OPENAI_API_KEY environment variable is missing."
+            "GEMINI_API_KEY environment variable is missing."
         )
 
-    client = OpenAI(
+    client = genai.Client(
         api_key=api_key
     )
 
@@ -336,58 +396,69 @@ def call_openai(
         try:
 
             log.info(
-                "Calling OpenAI model %s (attempt %d/%d)...",
-                OPENAI_MODEL,
+                "Calling Gemini model %s (attempt %d/%d)...",
+                GEMINI_MODEL,
                 attempt,
                 retries,
             )
 
-            response = client.responses.create(
-                model=OPENAI_MODEL,
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
 
-                instructions=SYSTEM_PROMPT,
+                contents=prompt,
 
-                input=prompt,
+                config=types.GenerateContentConfig(
 
-                max_output_tokens=32768,
+                    response_mime_type="application/json",
+
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                ),
             )
 
-            # -------------------------------------------------------------
-            # Get generated text
-            # -------------------------------------------------------------
+            if not response:
 
-            raw = response.output_text
+                raise RuntimeError(
+                    "Gemini returned an empty response."
+                )
+
+            raw = response.text
 
             if not raw:
 
-                raise ValueError(
-                    "OpenAI returned an empty response."
+                raise RuntimeError(
+                    "Gemini returned empty text."
                 )
 
             log.info(
-                "OpenAI response received successfully."
+                "Gemini response received successfully."
             )
 
             return raw.strip()
 
         except Exception as e:
 
+            error_text = str(e)
+
             log.warning(
-                "OpenAI request failed "
+                "Gemini request failed "
                 "(attempt %d/%d): %s",
                 attempt,
                 retries,
-                e,
+                error_text,
             )
 
-            if attempt == retries:
+            if attempt >= retries:
 
                 raise
+
+            # -------------------------------------------------------------
+            # Retry temporary service errors.
+            # -------------------------------------------------------------
 
             wait = 5 * attempt
 
             log.warning(
-                "Retrying OpenAI in %d seconds...",
+                "Retrying Gemini in %d seconds...",
                 wait,
             )
 
@@ -396,40 +467,8 @@ def call_openai(
             )
 
     raise RuntimeError(
-        "All OpenAI retries exhausted."
+        "All Gemini retries exhausted."
     )
-
-
-# =============================================================================
-# CLEAN JSON
-# =============================================================================
-
-def clean_json_response(
-    raw: str,
-) -> str:
-
-    raw = raw.strip()
-
-    # Remove Markdown JSON wrapper if model happens to return one.
-    if raw.startswith("```json"):
-
-        raw = raw[
-            len("```json"):
-        ]
-
-    elif raw.startswith("```"):
-
-        raw = raw[
-            len("```"):
-        ]
-
-    if raw.endswith("```"):
-
-        raw = raw[
-            :-len("```")
-        ]
-
-    return raw.strip()
 
 
 # =============================================================================
@@ -440,11 +479,14 @@ def run_analysis(
     news_data: dict,
 ) -> dict:
 
-    news_count = len(
-        news_data.get(
-            "news",
-            [],
-        )
+    news_items = news_data.get(
+        "news",
+        [],
+    )
+
+    log.info(
+        "Analyzing %d news items...",
+        len(news_items),
     )
 
     prompt = build_prompt(
@@ -452,16 +494,11 @@ def run_analysis(
     )
 
     log.info(
-        "Analyzing %d news items...",
-        news_count,
-    )
-
-    log.info(
-        "Sending %d chars to OpenAI...",
+        "Sending %d chars to Gemini...",
         len(prompt),
     )
 
-    raw = call_openai(
+    raw = call_gemini(
         prompt
     )
 
@@ -482,7 +519,7 @@ def run_analysis(
     except json.JSONDecodeError as e:
 
         log.error(
-            "OpenAI returned invalid JSON."
+            "Gemini returned invalid JSON."
         )
 
         log.error(
@@ -498,7 +535,7 @@ def run_analysis(
         raise
 
     # -------------------------------------------------------------------------
-    # Validate basic structure
+    # Validate response
     # -------------------------------------------------------------------------
 
     if not isinstance(
@@ -507,11 +544,12 @@ def run_analysis(
     ):
 
         raise ValueError(
-            "OpenAI response is not a JSON object."
+            "Gemini response is not a JSON object."
         )
 
     analyses = result.get(
-        "analyses"
+        "analyses",
+        [],
     )
 
     if not isinstance(
@@ -520,12 +558,11 @@ def run_analysis(
     ):
 
         raise ValueError(
-            "OpenAI response does not contain "
-            "a valid 'analyses' array."
+            "Gemini 'analyses' is not a list."
         )
 
     log.info(
-        "OpenAI returned %d analyses.",
+        "Gemini returned %d analyses.",
         len(analyses),
     )
 
@@ -539,7 +576,7 @@ def run_analysis(
 def main():
 
     # -------------------------------------------------------------------------
-    # Check input file
+    # Check input
     # -------------------------------------------------------------------------
 
     if not INPUT_FILE.exists():
@@ -550,7 +587,7 @@ def main():
         )
 
         log.error(
-            "Run the news fetcher first."
+            "Run news_fetcher.py first."
         )
 
         return
@@ -587,7 +624,7 @@ def main():
         raise
 
     # -------------------------------------------------------------------------
-    # Run OpenAI analysis
+    # Run analysis
     # -------------------------------------------------------------------------
 
     result = run_analysis(
@@ -604,7 +641,7 @@ def main():
     )
 
     # -------------------------------------------------------------------------
-    # Add timestamp
+    # Add generated timestamp
     # -------------------------------------------------------------------------
 
     result["generated_at"] = news_data.get(
@@ -612,13 +649,13 @@ def main():
     )
 
     # -------------------------------------------------------------------------
-    # Add model
+    # Add model name
     # -------------------------------------------------------------------------
 
-    result["ai_model"] = OPENAI_MODEL
+    result["ai_model"] = GEMINI_MODEL
 
     # -------------------------------------------------------------------------
-    # Save
+    # Save output
     # -------------------------------------------------------------------------
 
     OUTPUT_FILE.write_text(
@@ -631,7 +668,7 @@ def main():
     )
 
     # -------------------------------------------------------------------------
-    # Final log
+    # Final logs
     # -------------------------------------------------------------------------
 
     log.info(
@@ -663,7 +700,7 @@ def main():
 
     log.info(
         "AI model: %s",
-        OPENAI_MODEL,
+        GEMINI_MODEL,
     )
 
     log.info(
