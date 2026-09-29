@@ -1,4 +1,3 @@
-````python
 """
 stock_analyzer.py — Gemini API
 Model: gemini-2.5-flash
@@ -678,4 +677,3 @@ if __name__ == "__main__":
     )
 
     main()
-````
