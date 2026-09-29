@@ -1,75 +1,42 @@
-
 """
-stock_analyzer.py
-
-Gemini-powered Indian stock news analyzer.
-
-Uses ONE Gemini model only.
-No fallback models.
-No model retry chain.
+stock_analyzer.py — Gemini free tier
+Model: gemini-3.8-flash (recommended by Google for this account)
 """
 
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import requests
 
-
-# ============================================================
-# LOGGER
-# ============================================================
-
 log = logging.getLogger(__name__)
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-INPUT_FILE = Path("data/news_raw.json")
+INPUT_FILE  = Path("data/news_raw.json")
 OUTPUT_FILE = Path("data/analysis.json")
 
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_URL   = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
 
-# Use ONE model only.
-GEMINI_MODEL = "gemini-2.5-flash"
-
-# Number of news items sent in one Gemini request.
 BATCH_SIZE = 10
 
-
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
-
-SYSTEM_PROMPT = """
-You are a senior equity research analyst for Indian stock markets
-(NSE/BSE).
-
-Analyze the supplied news items.
-
-Return ONLY one valid JSON object.
-
-Do NOT return markdown.
-Do NOT return ```json.
-Do NOT add explanations outside JSON.
-
-Keep every text field to ONE short sentence.
+SYSTEM_PROMPT = """You are a senior equity research analyst for Indian stock markets (NSE/BSE).
+Analyze the news items and return ONLY a valid JSON object.
+No markdown, no explanation, no ```json fences. Start with { and end with }.
+Keep every text field to ONE sentence to avoid truncation.
 
 JSON schema:
-
 {
   "analyses": [
     {
       "news_id": "string",
       "symbol": "string or null",
       "headline": "one short sentence",
-
-      "event_type":
-        "quarterly_result|new_order|bulk_deal|corporate_action|ma_event|general",
-
+      "event_type": "quarterly_result|new_order|bulk_deal|corporate_action|ma_event|general",
       "fundamentals": {
         "eps_impact": "positive|negative|neutral|unknown",
         "revenue_direction": "up|down|flat|unknown",
@@ -77,618 +44,178 @@ JSON schema:
         "debt_concern": false,
         "commentary": "one sentence"
       },
-
       "price_impact": {
-        "direction": "positive|negative|neutral|unknown",
-        "strength": "high|medium|low|unknown",
-        "time_horizon": "intraday|short_term|medium_term|unknown",
+        "short_term_pct_low": 0,
+        "short_term_pct_high": 0,
+        "medium_term_pct_low": 0,
+        "medium_term_pct_high": 0,
         "rationale": "one sentence"
       },
-
       "signal": "BUY|HOLD|WATCH|AVOID",
       "conviction": 5,
-
-      "key_risks": [
-        "short phrase"
-      ],
-
-      "key_catalysts": [
-        "short phrase"
-      ],
-
-      "action_items": [
-        "short phrase"
-      ]
+      "key_risks": ["short phrase"],
+      "key_catalysts": ["short phrase"],
+      "action_items": ["short phrase"]
     }
   ],
-
   "market_summary": "one sentence",
-
   "top_pick": "SYMBOL or null",
-
   "top_pick_reason": "one sentence"
-}
-"""
+}"""
 
 
-# ============================================================
-# GEMINI API CALL
-# ============================================================
-
-def call_gemini(prompt: str, api_key: str) -> str:
-    """
-    Call exactly one Gemini model.
-
-    No fallback.
-    No retry.
-    """
-
-    url = (
-        f"{GEMINI_BASE}/models/"
-        f"{GEMINI_MODEL}:generateContent"
-        f"?key={api_key}"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    log.info(
-        "Calling Gemini model: %s",
-        GEMINI_MODEL
-    )
-
-    response = requests.post(
-        url,
-        json=payload,
-        timeout=120
-    )
-
-    # --------------------------------------------------------
-    # API ERROR
-    # --------------------------------------------------------
-
-    if response.status_code != 200:
-
-        log.error(
-            "Gemini API error: HTTP %s",
-            response.status_code
-        )
-
-        log.error(
-            "Gemini response: %s",
-            response.text[:3000]
-        )
-
-        response.raise_for_status()
-
-    # --------------------------------------------------------
-    # PARSE RESPONSE
-    # --------------------------------------------------------
-
-    data = response.json()
-
-    candidates = data.get(
-        "candidates",
-        []
-    )
-
-    if not candidates:
-        raise RuntimeError(
-            "Gemini returned no candidates"
-        )
-
-    candidate = candidates[0]
-
-    finish_reason = candidate.get(
-        "finishReason",
-        ""
-    )
-
-    if finish_reason == "MAX_TOKENS":
-
-        raise RuntimeError(
-            "Gemini response exceeded MAX_OUTPUT_TOKENS"
-        )
-
-    content = candidate.get(
-        "content",
-        {}
-    )
-
-    parts = content.get(
-        "parts",
-        []
-    )
-
-    if not parts:
-
-        raise RuntimeError(
-            "Gemini returned empty content"
-        )
-
-    text = parts[0].get(
-        "text",
-        ""
-    )
-
-    if not text:
-
-        raise RuntimeError(
-            "Gemini returned empty text"
-        )
-
-    return text.strip()
-
-
-# ============================================================
-# CLEAN JSON
-# ============================================================
-
-def clean_json(raw: str) -> str:
-    """
-    Remove accidental markdown code fences.
-    """
-
-    raw = raw.strip()
-
-    if raw.startswith("```"):
-
-        first_newline = raw.find("\n")
-
-        if first_newline != -1:
-            raw = raw[first_newline + 1:]
-
-    if raw.endswith("```"):
-        raw = raw[:-3]
-
-    return raw.strip()
-
-
-# ============================================================
-# BUILD GEMINI PROMPT
-# ============================================================
-
-def build_prompt(
-    news_items: list,
-    prices: dict,
-    generated_at: str,
-    mode: str
-) -> str:
-
-    lines = [
-        SYSTEM_PROMPT,
-        "",
-        f"Date: {generated_at}",
-        f"Mode: {mode}",
-        "",
-        "=== NEWS ITEMS ==="
-    ]
-
+def build_prompt(news_items: list, prices: dict, generated_at: str, mode: str) -> str:
+    lines = [SYSTEM_PROMPT, "", f"Date: {generated_at} | Mode: {mode}", "", "=== NEWS ITEMS ==="]
     for item in news_items:
-
-        item_id = item.get(
-            "id",
-            ""
-        )
-
-        item_type = item.get(
-            "type",
-            ""
-        ).upper()
-
-        title = item.get(
-            "title",
-            ""
-        )
-
-        symbols = ", ".join(
-            item.get(
-                "symbols",
-                []
-            )
-        )
-
-        if not symbols:
-            symbols = "N/A"
-
-        summary = item.get(
-            "summary",
-            ""
-        )
-
-        # Limit summary size to reduce token usage.
-        summary = summary[:250]
-
         lines.append(
-            f"\n[{item_id}]"
-            f"\nType: {item_type}"
-            f"\nTitle: {title}"
-            f"\nSymbols: {symbols}"
-            f"\nSummary: {summary}"
+            f"\n[{item['id']}] ({item['type'].upper()}) {item['title']}\n"
+            f"Symbols: {', '.join(item.get('symbols', [])) or 'N/A'}\n"
+            f"Summary: {item['summary'][:200]}"
         )
-
-    # --------------------------------------------------------
-    # PRICES
-    # --------------------------------------------------------
-
     if prices:
-
-        lines.append(
-            "\n=== CURRENT PRICES ==="
-        )
-
-        for symbol, price_data in list(
-            prices.items()
-        )[:30]:
-
-            price = price_data.get(
-                "price",
-                "N/A"
-            )
-
-            change_pct = price_data.get(
-                "change_pct"
-            )
-
-            if change_pct is None:
-
-                change = "N/A"
-
-            else:
-
-                change = (
-                    f"{change_pct:+.2f}%"
-                )
-
-            lines.append(
-                f"{symbol}: ₹{price} ({change})"
-            )
-
-    lines.append(
-        "\nReturn ONLY the JSON object."
-    )
-
+        lines.append("\n=== PRICES ===")
+        for sym, p in list(prices.items())[:20]:
+            chg = f"{p['change_pct']:+.2f}%" if p.get("change_pct") is not None else "N/A"
+            lines.append(f"{sym}: ₹{p.get('price', 'N/A')} ({chg})")
+    lines.append("\nReturn ONLY the JSON object.")
     return "\n".join(lines)
 
 
-# ============================================================
-# ANALYZE ONE BATCH
-# ============================================================
+def call_gemini(prompt: str, retries: int = 3) -> str:
+    api_key = os.environ["GEMINI_API_KEY"]
+    url     = f"{GEMINI_URL}?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature":      0.1,
+            "maxOutputTokens":  8192,
+            "responseMimeType": "application/json",
+        },
+    }
 
-def analyze_batch(
-    items: list,
-    prices: dict,
-    generated_at: str,
-    mode: str,
-    api_key: str
-):
+    for attempt in range(1, retries + 1):
+        try:
+            log.info("Calling Gemini model: %s (attempt %d/%d)", GEMINI_MODEL, attempt, retries)
+            resp = requests.post(url, json=payload, timeout=120)
 
-    prompt = build_prompt(
-        items,
-        prices,
-        generated_at,
-        mode
-    )
+            if resp.status_code == 503:
+                wait = 20 * attempt
+                log.warning("503 overloaded — waiting %ds before retry %d/%d", wait, attempt, retries)
+                time.sleep(wait)
+                continue
 
-    log.info(
-        "Sending %d characters for %d news items",
-        len(prompt),
-        len(items)
-    )
+            if resp.status_code == 429:
+                wait = 30 * attempt
+                log.warning("429 rate limited — waiting %ds before retry %d/%d", wait, attempt, retries)
+                time.sleep(wait)
+                continue
 
-    raw = call_gemini(
-        prompt,
-        api_key
-    )
+            if not resp.ok:
+                log.error("Gemini API error: HTTP %d\n%s", resp.status_code, resp.text)
+                resp.raise_for_status()
 
-    cleaned = clean_json(
-        raw
-    )
+            data       = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise ValueError("No candidates in Gemini response")
 
-    try:
+            finish_reason = candidates[0].get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                raise ValueError("MAX_TOKENS")
 
-        result = json.loads(
-            cleaned
-        )
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                raise ValueError("Empty parts in Gemini response")
 
-    except json.JSONDecodeError as exc:
+            return parts[0]["text"].strip()
 
-        log.error(
-            "Gemini returned invalid JSON"
-        )
+        except ValueError:
+            raise
+        except requests.exceptions.RequestException as e:
+            log.warning("Request error attempt %d/%d: %s", attempt, retries, e)
+            if attempt == retries:
+                raise
+            time.sleep(10)
 
-        log.error(
-            "Raw response: %s",
-            raw[:5000]
-        )
-
-        raise exc
-
-    analyses = result.get(
-        "analyses",
-        []
-    )
-
-    return analyses, result
+    raise RuntimeError(f"All {retries} retries exhausted for {GEMINI_MODEL}")
 
 
-# ============================================================
-# RUN ANALYSIS
-# ============================================================
+def clean_json(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw[raw.index("\n") + 1:]
+    if raw.endswith("```"):
+        raw = raw[:raw.rfind("```")]
+    return raw.strip()
 
-def run_analysis(
-    news_data: dict
-) -> dict:
 
-    api_key = os.environ.get(
-        "GEMINI_API_KEY"
-    )
+def analyze_batch(items: list, prices: dict, generated_at: str, mode: str):
+    prompt = build_prompt(items, prices, generated_at, mode)
+    log.info("Sending %d characters for %d news items", len(prompt), len(items))
+    raw    = call_gemini(prompt)
+    result = json.loads(clean_json(raw))
+    return result.get("analyses", []), result
 
-    if not api_key:
 
-        raise RuntimeError(
-            "GEMINI_API_KEY environment variable is missing"
-        )
-
-    news_items = news_data.get(
-        "news",
-        []
-    )
-
-    prices = news_data.get(
-        "prices",
-        {}
-    )
-
-    generated_at = news_data.get(
-        "generated_at",
-        ""
-    )
-
-    mode = news_data.get(
-        "mode",
-        ""
-    )
+def run_analysis(news_data: dict) -> dict:
+    news_items   = news_data.get("news", [])
+    prices       = news_data.get("prices", {})
+    generated_at = news_data.get("generated_at", "")
+    mode         = news_data.get("mode", "")
 
     all_analyses = []
+    last_result  = {}
 
-    last_result = {}
+    for i in range(0, len(news_items), BATCH_SIZE):
+        batch = news_items[i: i + BATCH_SIZE]
+        log.info("Batch %d-%d of %d...", i + 1, i + len(batch), len(news_items))
+        try:
+            analyses, result = analyze_batch(batch, prices, generated_at, mode)
+            all_analyses.extend(analyses)
+            last_result = result
 
-    total = len(
-        news_items
-    )
+        except ValueError as e:
+            if "MAX_TOKENS" in str(e):
+                log.warning("MAX_TOKENS — retrying in sub-batches of 5...")
+                for j in range(0, len(batch), 5):
+                    sub = batch[j: j + 5]
+                    try:
+                        analyses, result = analyze_batch(sub, prices, generated_at, mode)
+                        all_analyses.extend(analyses)
+                        last_result = result
+                    except Exception as sub_e:
+                        log.error("Sub-batch failed, skipping: %s", sub_e)
+            else:
+                raise
 
-    if total == 0:
-
-        log.warning(
-            "No news items found"
-        )
-
-        return {
-            "analyses": [],
-            "market_summary": "No news items available.",
-            "top_pick": None,
-            "top_pick_reason": "",
-            "prices": prices,
-            "generated_at": generated_at,
-            "ai_model": GEMINI_MODEL
-        }
-
-    # --------------------------------------------------------
-    # PROCESS BATCHES
-    # --------------------------------------------------------
-
-    for i in range(
-        0,
-        total,
-        BATCH_SIZE
-    ):
-
-        batch = news_items[
-            i:i + BATCH_SIZE
-        ]
-
-        start_number = i + 1
-        end_number = i + len(batch)
-
-        log.info(
-            "Batch %d-%d of %d...",
-            start_number,
-            end_number,
-            total
-        )
-
-        analyses, result = analyze_batch(
-            batch,
-            prices,
-            generated_at,
-            mode,
-            api_key
-        )
-
-        all_analyses.extend(
-            analyses
-        )
-
-        last_result = result
-
-        log.info(
-            "Batch %d-%d completed. Received %d analyses.",
-            start_number,
-            end_number,
-            len(analyses)
-        )
-
-    # --------------------------------------------------------
-    # FINAL RESULT
-    # --------------------------------------------------------
+        except json.JSONDecodeError as e:
+            log.error("JSON parse error batch %d — skipping: %s", i, e)
+            continue
 
     return {
-        "analyses": all_analyses,
-
-        "market_summary": last_result.get(
-            "market_summary",
-            "Market data processed."
-        ),
-
-        "top_pick": last_result.get(
-            "top_pick"
-        ),
-
-        "top_pick_reason": last_result.get(
-            "top_pick_reason",
-            ""
-        ),
-
-        "prices": prices,
-
-        "generated_at": generated_at,
-
-        "ai_model": GEMINI_MODEL
+        "analyses":        all_analyses,
+        "market_summary":  last_result.get("market_summary", "Market data processed."),
+        "top_pick":        last_result.get("top_pick"),
+        "top_pick_reason": last_result.get("top_pick_reason", ""),
+        "prices":          prices,
+        "generated_at":    generated_at,
+        "ai_model":        GEMINI_MODEL,
     }
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
-    # --------------------------------------------------------
-    # CHECK INPUT FILE
-    # --------------------------------------------------------
-
     if not INPUT_FILE.exists():
-
-        log.error(
-            "Input file not found: %s",
-            INPUT_FILE
-        )
-
-        log.error(
-            "Run news_fetcher.py first."
-        )
-
+        log.error("No input at %s — run news_fetcher.py first.", INPUT_FILE)
         return
+    log.info("Reading news from %s", INPUT_FILE)
+    news_data = json.loads(INPUT_FILE.read_text())
+    log.info("Analyzing %d news items...", news_data.get("news_count", 0))
+    result = run_analysis(news_data)
+    OUTPUT_FILE.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    log.info("Done — %d items analyzed. Top pick: %s",
+             len(result.get("analyses", [])), result.get("top_pick", "none"))
 
-    log.info(
-        "Reading news from %s",
-        INPUT_FILE
-    )
-
-    # --------------------------------------------------------
-    # LOAD NEWS
-    # --------------------------------------------------------
-
-    news_data = json.loads(
-        INPUT_FILE.read_text(
-            encoding="utf-8"
-        )
-    )
-
-    news_count = news_data.get(
-        "news_count",
-        len(
-            news_data.get(
-                "news",
-                []
-            )
-        )
-    )
-
-    log.info(
-        "Analyzing %d news items...",
-        news_count
-    )
-
-    # --------------------------------------------------------
-    # RUN GEMINI ANALYSIS
-    # --------------------------------------------------------
-
-    result = run_analysis(
-        news_data
-    )
-
-    # --------------------------------------------------------
-    # CREATE OUTPUT DIRECTORY
-    # --------------------------------------------------------
-
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # WRITE RESULT
-    # --------------------------------------------------------
-
-    OUTPUT_FILE.write_text(
-        json.dumps(
-            result,
-            indent=2,
-            ensure_ascii=False
-        ),
-        encoding="utf-8"
-    )
-
-    # --------------------------------------------------------
-    # COMPLETE
-    # --------------------------------------------------------
-
-    log.info(
-        "Done — %d items.",
-        len(
-            result.get(
-                "analyses",
-                []
-            )
-        )
-    )
-
-    log.info(
-        "Model used: %s",
-        result.get(
-            "ai_model"
-        )
-    )
-
-    log.info(
-        "Top pick: %s",
-        result.get(
-            "top_pick",
-            "none"
-        )
-    )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format=(
-            "%(asctime)s "
-            "[%(levelname)s] "
-            "%(message)s"
-        )
-    )
-
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     main()
-
