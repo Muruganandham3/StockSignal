@@ -49,11 +49,11 @@ OUTPUT_FILE = Path("data/analysis.json")
 # =============================================================================
 
 # Primary model
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 # Fallback models
 GEMINI_FALLBACK_MODELS = [
-    "gemini-3.5-flash",
+    "gemini-3.4-flash",
 ]
 
 GEMINI_BASE_URL = (
