@@ -1,8 +1,10 @@
+````python
 """
 stock_analyzer.py
+
 Gemini-powered Indian stock news analyzer.
 
-Uses ONE Gemini model.
+Uses ONE Gemini model only.
 No fallback models.
 No model retry chain.
 """
@@ -16,6 +18,13 @@ import requests
 
 
 # ============================================================
+# LOGGER
+# ============================================================
+
+log = logging.getLogger(__name__)
+
+
+# ============================================================
 # CONFIG
 # ============================================================
 
@@ -24,15 +33,15 @@ OUTPUT_FILE = Path("data/analysis.json")
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Use one model only.
-# Change this ONLY if your API key does not support it.
+# Use ONE model only.
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# Number of news items sent in one Gemini request.
 BATCH_SIZE = 10
 
 
 # ============================================================
-# PROMPT
+# SYSTEM PROMPT
 # ============================================================
 
 SYSTEM_PROMPT = """
@@ -42,6 +51,7 @@ You are a senior equity research analyst for Indian stock markets
 Analyze the supplied news items.
 
 Return ONLY one valid JSON object.
+
 Do NOT return markdown.
 Do NOT return ```json.
 Do NOT add explanations outside JSON.
@@ -102,7 +112,7 @@ JSON schema:
 
 
 # ============================================================
-# GEMINI API
+# GEMINI API CALL
 # ============================================================
 
 def call_gemini(prompt: str, api_key: str) -> str:
@@ -136,7 +146,10 @@ def call_gemini(prompt: str, api_key: str) -> str:
         }
     }
 
-    log.info("Calling Gemini model: %s", GEMINI_MODEL)
+    log.info(
+        "Calling Gemini model: %s",
+        GEMINI_MODEL
+    )
 
     response = requests.post(
         url,
@@ -145,7 +158,7 @@ def call_gemini(prompt: str, api_key: str) -> str:
     )
 
     # --------------------------------------------------------
-    # Error handling
+    # API ERROR
     # --------------------------------------------------------
 
     if response.status_code != 200:
@@ -157,14 +170,21 @@ def call_gemini(prompt: str, api_key: str) -> str:
 
         log.error(
             "Gemini response: %s",
-            response.text[:2000]
+            response.text[:3000]
         )
 
         response.raise_for_status()
 
+    # --------------------------------------------------------
+    # PARSE RESPONSE
+    # --------------------------------------------------------
+
     data = response.json()
 
-    candidates = data.get("candidates", [])
+    candidates = data.get(
+        "candidates",
+        []
+    )
 
     if not candidates:
         raise RuntimeError(
@@ -179,6 +199,7 @@ def call_gemini(prompt: str, api_key: str) -> str:
     )
 
     if finish_reason == "MAX_TOKENS":
+
         raise RuntimeError(
             "Gemini response exceeded MAX_OUTPUT_TOKENS"
         )
@@ -194,6 +215,7 @@ def call_gemini(prompt: str, api_key: str) -> str:
     )
 
     if not parts:
+
         raise RuntimeError(
             "Gemini returned empty content"
         )
@@ -204,6 +226,7 @@ def call_gemini(prompt: str, api_key: str) -> str:
     )
 
     if not text:
+
         raise RuntimeError(
             "Gemini returned empty text"
         )
@@ -212,17 +235,18 @@ def call_gemini(prompt: str, api_key: str) -> str:
 
 
 # ============================================================
-# JSON CLEANING
+# CLEAN JSON
 # ============================================================
 
 def clean_json(raw: str) -> str:
     """
-    Remove accidental markdown fences if Gemini returns them.
+    Remove accidental markdown code fences.
     """
 
     raw = raw.strip()
 
     if raw.startswith("```"):
+
         first_newline = raw.find("\n")
 
         if first_newline != -1:
@@ -235,7 +259,7 @@ def clean_json(raw: str) -> str:
 
 
 # ============================================================
-# PROMPT BUILDER
+# BUILD GEMINI PROMPT
 # ============================================================
 
 def build_prompt(
@@ -256,8 +280,26 @@ def build_prompt(
 
     for item in news_items:
 
+        item_id = item.get(
+            "id",
+            ""
+        )
+
+        item_type = item.get(
+            "type",
+            ""
+        ).upper()
+
+        title = item.get(
+            "title",
+            ""
+        )
+
         symbols = ", ".join(
-            item.get("symbols", [])
+            item.get(
+                "symbols",
+                []
+            )
         )
 
         if not symbols:
@@ -266,17 +308,22 @@ def build_prompt(
         summary = item.get(
             "summary",
             ""
-        )[:250]
+        )
+
+        # Limit summary size to reduce token usage.
+        summary = summary[:250]
 
         lines.append(
-            f"""
-[{item.get('id', '')}]
-Type: {item.get('type', '').upper()}
-Title: {item.get('title', '')}
-Symbols: {symbols}
-Summary: {summary}
-"""
+            f"\n[{item_id}]"
+            f"\nType: {item_type}"
+            f"\nTitle: {title}"
+            f"\nSymbols: {symbols}"
+            f"\nSummary: {summary}"
         )
+
+    # --------------------------------------------------------
+    # PRICES
+    # --------------------------------------------------------
 
     if prices:
 
@@ -298,9 +345,14 @@ Summary: {summary}
             )
 
             if change_pct is None:
+
                 change = "N/A"
+
             else:
-                change = f"{change_pct:+.2f}%"
+
+                change = (
+                    f"{change_pct:+.2f}%"
+                )
 
             lines.append(
                 f"{symbol}: ₹{price} ({change})"
@@ -314,7 +366,7 @@ Summary: {summary}
 
 
 # ============================================================
-# ANALYZE BATCH
+# ANALYZE ONE BATCH
 # ============================================================
 
 def analyze_batch(
@@ -343,7 +395,9 @@ def analyze_batch(
         api_key
     )
 
-    cleaned = clean_json(raw)
+    cleaned = clean_json(
+        raw
+    )
 
     try:
 
@@ -373,10 +427,12 @@ def analyze_batch(
 
 
 # ============================================================
-# MAIN ANALYSIS
+# RUN ANALYSIS
 # ============================================================
 
-def run_analysis(news_data: dict) -> dict:
+def run_analysis(
+    news_data: dict
+) -> dict:
 
     api_key = os.environ.get(
         "GEMINI_API_KEY"
@@ -412,7 +468,29 @@ def run_analysis(news_data: dict) -> dict:
 
     last_result = {}
 
-    total = len(news_items)
+    total = len(
+        news_items
+    )
+
+    if total == 0:
+
+        log.warning(
+            "No news items found"
+        )
+
+        return {
+            "analyses": [],
+            "market_summary": "No news items available.",
+            "top_pick": None,
+            "top_pick_reason": "",
+            "prices": prices,
+            "generated_at": generated_at,
+            "ai_model": GEMINI_MODEL
+        }
+
+    # --------------------------------------------------------
+    # PROCESS BATCHES
+    # --------------------------------------------------------
 
     for i in range(
         0,
@@ -424,10 +502,13 @@ def run_analysis(news_data: dict) -> dict:
             i:i + BATCH_SIZE
         ]
 
+        start_number = i + 1
+        end_number = i + len(batch)
+
         log.info(
-            "Batch %d-%d of %d",
-            i + 1,
-            i + len(batch),
+            "Batch %d-%d of %d...",
+            start_number,
+            end_number,
             total
         )
 
@@ -444,6 +525,17 @@ def run_analysis(news_data: dict) -> dict:
         )
 
         last_result = result
+
+        log.info(
+            "Batch %d-%d completed. Received %d analyses.",
+            start_number,
+            end_number,
+            len(analyses)
+        )
+
+    # --------------------------------------------------------
+    # FINAL RESULT
+    # --------------------------------------------------------
 
     return {
         "analyses": all_analyses,
@@ -476,11 +568,19 @@ def run_analysis(news_data: dict) -> dict:
 
 def main():
 
+    # --------------------------------------------------------
+    # CHECK INPUT FILE
+    # --------------------------------------------------------
+
     if not INPUT_FILE.exists():
 
         log.error(
             "Input file not found: %s",
             INPUT_FILE
+        )
+
+        log.error(
+            "Run news_fetcher.py first."
         )
 
         return
@@ -490,6 +590,10 @@ def main():
         INPUT_FILE
     )
 
+    # --------------------------------------------------------
+    # LOAD NEWS
+    # --------------------------------------------------------
+
     news_data = json.loads(
         INPUT_FILE.read_text(
             encoding="utf-8"
@@ -498,7 +602,12 @@ def main():
 
     news_count = news_data.get(
         "news_count",
-        len(news_data.get("news", []))
+        len(
+            news_data.get(
+                "news",
+                []
+            )
+        )
     )
 
     log.info(
@@ -506,14 +615,26 @@ def main():
         news_count
     )
 
+    # --------------------------------------------------------
+    # RUN GEMINI ANALYSIS
+    # --------------------------------------------------------
+
     result = run_analysis(
         news_data
     )
+
+    # --------------------------------------------------------
+    # CREATE OUTPUT DIRECTORY
+    # --------------------------------------------------------
 
     OUTPUT_FILE.parent.mkdir(
         parents=True,
         exist_ok=True
     )
+
+    # --------------------------------------------------------
+    # WRITE RESULT
+    # --------------------------------------------------------
 
     OUTPUT_FILE.write_text(
         json.dumps(
@@ -524,11 +645,33 @@ def main():
         encoding="utf-8"
     )
 
+    # --------------------------------------------------------
+    # COMPLETE
+    # --------------------------------------------------------
+
     log.info(
-        "Done — %d items. Model used: %s. Top pick: %s",
-        len(result.get("analyses", [])),
-        result.get("ai_model"),
-        result.get("top_pick", "none")
+        "Done — %d items.",
+        len(
+            result.get(
+                "analyses",
+                []
+            )
+        )
+    )
+
+    log.info(
+        "Model used: %s",
+        result.get(
+            "ai_model"
+        )
+    )
+
+    log.info(
+        "Top pick: %s",
+        result.get(
+            "top_pick",
+            "none"
+        )
     )
 
 
@@ -548,3 +691,4 @@ if __name__ == "__main__":
     )
 
     main()
+  
