@@ -1,4 +1,4 @@
-````python
+
 """
 stock_analyzer.py
 
@@ -691,9 +691,4 @@ if __name__ == "__main__":
     )
 
     main()
-````
 
-Paste this entire file over your existing `src/stock_analyzer.py`.
-
-**One important note:** this fixes the current `NameError`. If the next run shows a Gemini **404**, **400**, or **403**, paste that complete error here. The next fix should be based on the exact API response rather than adding another fallback chain.
-      
