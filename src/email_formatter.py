@@ -8,10 +8,15 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+
 INPUT_FILE = Path("data/analysis.json")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+# ============================================================
+# SIGNAL COLORS
+# ============================================================
 
 SIGNAL_COLORS = {
     "BUY": {
@@ -37,6 +42,10 @@ SIGNAL_COLORS = {
 }
 
 
+# ============================================================
+# EVENT LABELS
+# ============================================================
+
 EVENT_LABELS = {
     "quarterly_result": "📊 Quarterly Result",
     "new_order": "📦 New Order",
@@ -47,26 +56,51 @@ EVENT_LABELS = {
 }
 
 
+# ============================================================
+# CONVICTION BAR
+# ============================================================
+
 def conviction_bar(score: int) -> str:
+
+    try:
+        score = int(score)
+    except (TypeError, ValueError):
+        score = 5
+
+    score = max(0, min(10, score))
+
     filled = "█" * score
     empty = "░" * (10 - score)
 
-    color = (
-        "#28a745"
-        if score >= 7
-        else "#ffc107"
-        if score >= 4
-        else "#dc3545"
-    )
+    if score >= 7:
+        color = "#28a745"
+    elif score >= 4:
+        color = "#ffc107"
+    else:
+        color = "#dc3545"
 
     return (
-        f'<span style="font-family:monospace;'
-        f'color:{color};font-size:13px;white-space:nowrap;">'
-        f"{filled}{empty}</span> "
-        f'<span style="color:#555;font-size:12px;white-space:nowrap;">'
-        f"{score}/10</span>"
+        '<span style="'
+        'font-family:monospace;'
+        f'color:{color};'
+        'font-size:13px;'
+        'white-space:nowrap;'
+        '">'
+        f"{filled}{empty}"
+        "</span> "
+        '<span style="'
+        'color:#555;'
+        'font-size:12px;'
+        'white-space:nowrap;'
+        '">'
+        f"{score}/10"
+        "</span>"
     )
 
+
+# ============================================================
+# IMPACT BADGE
+# ============================================================
 
 def impact_badge(
     low: float,
@@ -74,26 +108,47 @@ def impact_badge(
     direction: str = "short",
 ) -> str:
 
+    try:
+        low = float(low)
+    except (TypeError, ValueError):
+        low = 0.0
+
+    try:
+        high = float(high)
+    except (TypeError, ValueError):
+        high = 0.0
+
     avg = (low + high) / 2
 
-    color = (
-        "#28a745"
-        if avg > 0
-        else "#dc3545"
-        if avg < 0
-        else "#888"
-    )
+    if avg > 0:
+        color = "#28a745"
+    elif avg < 0:
+        color = "#dc3545"
+    else:
+        color = "#888"
 
-    sign = "+" if low >= 0 else ""
+    sign_low = "+" if low >= 0 else ""
+    sign_high = "+" if high >= 0 else ""
 
     return (
-        f'<span style="background:{color}15;color:{color};'
-        f'padding:2px 8px;border-radius:4px;font-size:12px;'
-        f'font-weight:600;white-space:nowrap;">'
-        f"{sign}{low:.1f}% to {sign}{high:.1f}%"
-        f"</span>"
+        '<span style="'
+        f'background:{color}15;'
+        f'color:{color};'
+        'padding:2px 8px;'
+        'border-radius:4px;'
+        'font-size:12px;'
+        'font-weight:600;'
+        'white-space:nowrap;'
+        '">'
+        f"{sign_low}{low:.1f}% to "
+        f"{sign_high}{high:.1f}%"
+        "</span>"
     )
 
+
+# ============================================================
+# ANALYSIS CARD
+# ============================================================
 
 def render_analysis_card(item: dict) -> str:
 
@@ -113,24 +168,51 @@ def render_analysis_card(item: dict) -> str:
 
     fund = item.get("fundamentals", {})
     price = item.get("price_impact", {})
+
     risks = item.get("key_risks", [])
     cats = item.get("key_catalysts", [])
     actions = item.get("action_items", [])
+
+    # Make sure these are lists
+    if not isinstance(risks, list):
+        risks = []
+
+    if not isinstance(cats, list):
+        cats = []
+
+    if not isinstance(actions, list):
+        actions = []
+
+    # --------------------------------------------------------
+    # Risks
+    # --------------------------------------------------------
 
     risk_html = "".join(
         f"<li style='margin-bottom:3px;'>{r}</li>"
         for r in risks[:3]
     )
 
+    # --------------------------------------------------------
+    # Catalysts
+    # --------------------------------------------------------
+
     cat_html = "".join(
         f"<li style='margin-bottom:3px;'>{c}</li>"
         for c in cats[:3]
     )
 
+    # --------------------------------------------------------
+    # Actions
+    # --------------------------------------------------------
+
     act_html = "".join(
         f"<li style='margin-bottom:4px;'>→ {a}</li>"
         for a in actions[:3]
     )
+
+    # --------------------------------------------------------
+    # Price Impact
+    # --------------------------------------------------------
 
     st_badge = impact_badge(
         price.get("short_term_pct_low", 0),
@@ -142,10 +224,46 @@ def render_analysis_card(item: dict) -> str:
         price.get("medium_term_pct_high", 0),
     )
 
-    # ------------------------------------------------------------------
-    # Email-safe table layout
-    # Avoid flex/grid because email clients can render them inconsistently.
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------
+    # Action HTML
+    # --------------------------------------------------------
+
+    action_section = ""
+
+    if act_html:
+
+        action_section = f"""
+        <div style="
+            padding:0 14px 12px;
+            word-break:break-word;
+            overflow-wrap:anywhere;
+        ">
+
+            <p style="
+                margin:0 0 4px;
+                font-size:12px;
+                font-weight:600;
+                color:#0066cc;
+            ">
+                Action items
+            </p>
+
+            <ul style="
+                margin:0;
+                padding-left:4px;
+                list-style:none;
+                font-size:12px;
+                color:#333;
+            ">
+                {act_html}
+            </ul>
+
+        </div>
+        """
+
+    # --------------------------------------------------------
+    # Analysis Card
+    # --------------------------------------------------------
 
     return f"""
 <div style="
@@ -158,26 +276,41 @@ def render_analysis_card(item: dict) -> str:
     box-sizing:border-box;
 ">
 
-    <!-- Card Header -->
+    <!-- ================================================= -->
+    <!-- CARD HEADER -->
+    <!-- ================================================= -->
+
     <table
         role="presentation"
         cellpadding="0"
         cellspacing="0"
         border="0"
         width="100%"
-        style="width:100%;border-collapse:collapse;"
+        style="
+            width:100%;
+            border-collapse:collapse;
+            table-layout:fixed;
+        "
     >
+
         <tr>
+
             <td
                 style="
                     background:{colors['bg']};
                     border-left:4px solid {colors['border']};
-                    padding:12px 14px;
+                    padding:12px 10px;
                     vertical-align:middle;
+                    width:65%;
                 "
             >
 
-                <div style="font-size:12px;line-height:18px;">
+                <div style="
+                    font-size:12px;
+                    line-height:18px;
+                    word-break:break-word;
+                ">
+
                     <span style="
                         background:{colors['border']};
                         color:#fff;
@@ -185,41 +318,59 @@ def render_analysis_card(item: dict) -> str:
                         border-radius:12px;
                         font-size:11px;
                         font-weight:700;
-                    ">{sig}</span>
+                    ">
+                        {sig}
+                    </span>
 
                     <span style="
                         color:{colors['text']};
                         margin-left:5px;
-                    ">{ev}</span>
+                    ">
+                        {ev}
+                    </span>
+
                 </div>
 
             </td>
 
+
             <td
                 style="
                     background:{colors['bg']};
-                    padding:12px 14px;
+                    padding:12px 10px;
                     text-align:right;
                     vertical-align:middle;
+                    width:35%;
                     word-break:break-word;
+                    overflow-wrap:anywhere;
                 "
             >
+
                 <span style="
                     font-size:18px;
                     font-weight:700;
                     color:#1a1a1a;
-                ">{sym}</span>
+                ">
+                    {sym}
+                </span>
+
             </td>
+
         </tr>
+
     </table>
 
 
-    <!-- Headline -->
+    <!-- ================================================= -->
+    <!-- HEADLINE -->
+    <!-- ================================================= -->
+
     <div style="
         padding:12px 14px 8px;
         word-break:break-word;
         overflow-wrap:anywhere;
     ">
+
         <p style="
             margin:0;
             font-size:14px;
@@ -229,10 +380,14 @@ def render_analysis_card(item: dict) -> str:
         ">
             {item.get('headline', '')}
         </p>
+
     </div>
 
 
-    <!-- Fundamentals -->
+    <!-- ================================================= -->
+    <!-- FUNDAMENTALS -->
+    <!-- ================================================= -->
+
     <div style="
         padding:4px 14px 8px;
         overflow:hidden;
@@ -251,6 +406,7 @@ def render_analysis_card(item: dict) -> str:
                 table-layout:fixed;
             "
         >
+
             <tr>
 
                 <td style="
@@ -267,6 +423,7 @@ def render_analysis_card(item: dict) -> str:
                     padding:3px 4px;
                     width:26%;
                     word-break:break-word;
+                    overflow-wrap:anywhere;
                 ">
                     {fund.get('eps_impact', '—')}
                 </td>
@@ -285,11 +442,13 @@ def render_analysis_card(item: dict) -> str:
                     padding:3px 0 3px 4px;
                     width:26%;
                     word-break:break-word;
+                    overflow-wrap:anywhere;
                 ">
                     {fund.get('revenue_direction', '—')}
                 </td>
 
             </tr>
+
 
             <tr>
 
@@ -305,6 +464,7 @@ def render_analysis_card(item: dict) -> str:
                     text-transform:capitalize;
                     padding:3px 4px;
                     word-break:break-word;
+                    overflow-wrap:anywhere;
                 ">
                     {fund.get('margin_trend', '—')}
                 </td>
@@ -320,10 +480,15 @@ def render_analysis_card(item: dict) -> str:
                     font-weight:600;
                     padding:3px 0 3px 4px;
                 ">
-                    {'⚠️ Yes' if fund.get('debt_concern') else 'No'}
+                    {
+                        '⚠️ Yes'
+                        if fund.get('debt_concern')
+                        else 'No'
+                    }
                 </td>
 
             </tr>
+
         </table>
 
 
@@ -341,7 +506,10 @@ def render_analysis_card(item: dict) -> str:
     </div>
 
 
-    <!-- Price Impact -->
+    <!-- ================================================= -->
+    <!-- PRICE IMPACT -->
+    <!-- ================================================= -->
+
     <div style="
         padding:8px 14px;
         background:#f9f9f9;
@@ -358,6 +526,7 @@ def render_analysis_card(item: dict) -> str:
         ">
             Price impact estimate
         </span>
+
 
         <div style="
             margin-top:5px;
@@ -382,6 +551,7 @@ def render_analysis_card(item: dict) -> str:
 
         </div>
 
+
         <p style="
             margin:4px 0 0;
             font-size:12px;
@@ -396,7 +566,10 @@ def render_analysis_card(item: dict) -> str:
     </div>
 
 
-    <!-- Conviction -->
+    <!-- ================================================= -->
+    <!-- CONVICTION -->
+    <!-- ================================================= -->
+
     <div style="
         padding:8px 14px;
         overflow:hidden;
@@ -418,7 +591,10 @@ def render_analysis_card(item: dict) -> str:
     </div>
 
 
-    <!-- Risks / Catalysts -->
+    <!-- ================================================= -->
+    <!-- RISKS / CATALYSTS -->
+    <!-- ================================================= -->
+
     <table
         role="presentation"
         cellpadding="0"
@@ -432,6 +608,7 @@ def render_analysis_card(item: dict) -> str:
             font-size:12px;
         "
     >
+
         <tr>
 
             <td style="
@@ -439,6 +616,7 @@ def render_analysis_card(item: dict) -> str:
                 vertical-align:top;
                 padding:0 7px 12px 14px;
                 word-break:break-word;
+                overflow-wrap:anywhere;
             ">
 
                 <p style="
@@ -465,6 +643,7 @@ def render_analysis_card(item: dict) -> str:
                 vertical-align:top;
                 padding:0 14px 12px 7px;
                 word-break:break-word;
+                overflow-wrap:anywhere;
             ">
 
                 <p style="
@@ -486,33 +665,39 @@ def render_analysis_card(item: dict) -> str:
             </td>
 
         </tr>
+
     </table>
 
 
-    <!-- Action Items -->
-    {
-        '<div style="padding:0 14px 12px;word-break:break-word;">'
-        '<p style="margin:0 0 4px;font-size:12px;'
-        'font-weight:600;color:#0066cc;">Action items</p>'
-        '<ul style="margin:0;padding-left:4px;'
-        'list-style:none;font-size:12px;color:#333;">'
-        + act_html +
-        '</ul></div>'
-        if act_html
-        else ''
-    }
+    <!-- ================================================= -->
+    <!-- ACTION ITEMS -->
+    <!-- ================================================= -->
+
+    {action_section}
 
 </div>
 """
 
 
+# ============================================================
+# PRICE TABLE
+# ============================================================
+
 def render_price_table(prices: dict) -> str:
 
     rows = ""
 
+    if not isinstance(prices, dict):
+        prices = {}
+
     for sym, p in prices.items():
 
-        chg = p.get("change_pct")
+        if not isinstance(p, dict):
+            p = {}
+
+        # ----------------------------------------------------
+        # Price
+        # ----------------------------------------------------
 
         price_value = p.get("price")
 
@@ -525,58 +710,96 @@ def render_price_table(prices: dict) -> str:
             price_val = "N/A"
 
 
+        # ----------------------------------------------------
+        # Change
+        # ----------------------------------------------------
+
+        chg = p.get("change_pct")
+
         if chg is None:
 
             chg_html = (
                 '<span style="color:#888;">—</span>'
             )
 
-        elif chg >= 0:
-
-            chg_html = (
-                f'<span style="
-                    color:#28a745;
-                    font-weight:600;
-                    white-space:nowrap;
-                ">'
-                f"+{chg:.2f}%"
-                f"</span>"
-            )
-
         else:
 
-            chg_html = (
-                f'<span style="
-                    color:#dc3545;
-                    font-weight:600;
-                    white-space:nowrap;
-                ">'
-                f"{chg:.2f}%"
-                f"</span>"
-            )
+            try:
+                chg = float(chg)
+            except (TypeError, ValueError):
+                chg = None
+
+            if chg is None:
+
+                chg_html = (
+                    '<span style="color:#888;">—</span>'
+                )
+
+            elif chg >= 0:
+
+                chg_html = (
+                    '<span style="'
+                    'color:#28a745;'
+                    'font-weight:600;'
+                    'white-space:nowrap;'
+                    '">'
+                    f"+{chg:.2f}%"
+                    '</span>'
+                )
+
+            else:
+
+                chg_html = (
+                    '<span style="'
+                    'color:#dc3545;'
+                    'font-weight:600;'
+                    'white-space:nowrap;'
+                    '">'
+                    f"{chg:.2f}%"
+                    '</span>'
+                )
 
 
-        low = p.get("52w_low", "N/A")
-        high = p.get("52w_high", "N/A")
+        # ----------------------------------------------------
+        # 52 Week Range
+        # ----------------------------------------------------
 
+        low = p.get(
+            "52w_low",
+            "N/A",
+        )
+
+        high = p.get(
+            "52w_high",
+            "N/A",
+        )
+
+
+        # ----------------------------------------------------
+        # Row
+        # ----------------------------------------------------
 
         rows += f"""
-        <tr style="border-bottom:1px solid #f0f0f0;">
+        <tr style="
+            border-bottom:1px solid #f0f0f0;
+        ">
 
-            <!-- Symbol -->
+            <!-- SYMBOL -->
+
             <td style="
                 padding:7px 3px;
-                font-weight:600;
                 width:23%;
                 vertical-align:middle;
                 word-break:break-word;
                 overflow-wrap:anywhere;
+                font-weight:600;
             ">
                 {sym}
             </td>
 
 
-            <!-- Price -->
+            <!-- PRICE -->
+
             <td style="
                 padding:7px 3px;
                 width:23%;
@@ -588,7 +811,8 @@ def render_price_table(prices: dict) -> str:
             </td>
 
 
-            <!-- Change -->
+            <!-- CHANGE -->
+
             <td style="
                 padding:7px 3px;
                 width:21%;
@@ -600,7 +824,8 @@ def render_price_table(prices: dict) -> str:
             </td>
 
 
-            <!-- 52 Week Range -->
+            <!-- 52 WEEK RANGE -->
+
             <td style="
                 padding:7px 3px;
                 width:33%;
@@ -617,6 +842,10 @@ def render_price_table(prices: dict) -> str:
         </tr>
         """
 
+
+    # --------------------------------------------------------
+    # Complete Table
+    # --------------------------------------------------------
 
     return f"""
 <table
@@ -636,7 +865,12 @@ def render_price_table(prices: dict) -> str:
 
     <thead>
 
-        <tr style="background:#f5f5f5;">
+        <tr style="
+            background:#f5f5f5;
+        ">
+
+
+            <!-- SYMBOL HEADER -->
 
             <th style="
                 padding:8px 3px;
@@ -651,6 +885,8 @@ def render_price_table(prices: dict) -> str:
             </th>
 
 
+            <!-- PRICE HEADER -->
+
             <th style="
                 padding:8px 3px;
                 width:23%;
@@ -664,6 +900,8 @@ def render_price_table(prices: dict) -> str:
             </th>
 
 
+            <!-- CHANGE HEADER -->
+
             <th style="
                 padding:8px 3px;
                 width:21%;
@@ -676,6 +914,8 @@ def render_price_table(prices: dict) -> str:
                 Change
             </th>
 
+
+            <!-- 52 WEEK HEADER -->
 
             <th style="
                 padding:8px 3px;
@@ -695,12 +935,18 @@ def render_price_table(prices: dict) -> str:
 
 
     <tbody>
+
         {rows}
+
     </tbody>
 
 </table>
 """
 
+
+# ============================================================
+# BUILD EMAIL
+# ============================================================
 
 def build_email(analysis: dict) -> tuple[str, str]:
     """
@@ -714,7 +960,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
         "%A, %d %b %Y"
     )
 
-    top_pick = analysis.get("top_pick")
+    top_pick = analysis.get(
+        "top_pick"
+    )
 
     mkt_summary = analysis.get(
         "market_summary",
@@ -737,8 +985,20 @@ def build_email(analysis: dict) -> tuple[str, str]:
     )
 
 
-    # Sort:
-    # BUY -> WATCH -> HOLD -> AVOID
+    # ========================================================
+    # SAFETY
+    # ========================================================
+
+    if not isinstance(analyses, list):
+        analyses = []
+
+    if not isinstance(prices, dict):
+        prices = {}
+
+
+    # ========================================================
+    # SORT ANALYSIS
+    # ========================================================
 
     order = {
         "BUY": 0,
@@ -749,11 +1009,18 @@ def build_email(analysis: dict) -> tuple[str, str]:
 
     analyses.sort(
         key=lambda x: order.get(
-            x.get("signal", "WATCH"),
+            x.get(
+                "signal",
+                "WATCH",
+            ),
             1,
         )
     )
 
+
+    # ========================================================
+    # SUBJECT
+    # ========================================================
 
     subject = (
         f"📈 Stock Digest — {date_str}"
@@ -766,19 +1033,28 @@ def build_email(analysis: dict) -> tuple[str, str]:
         )
 
 
+    # ========================================================
+    # ANALYSIS CARDS
+    # ========================================================
+
     cards_html = "".join(
         render_analysis_card(a)
         for a in analyses[:10]
     )
+
+
+    # ========================================================
+    # PRICE TABLE
+    # ========================================================
 
     price_table = render_price_table(
         prices
     )
 
 
-    # ---------------------------------------------------------------
-    # Top Pick
-    # ---------------------------------------------------------------
+    # ========================================================
+    # TOP PICK
+    # ========================================================
 
     top_pick_section = ""
 
@@ -788,7 +1064,7 @@ def build_email(analysis: dict) -> tuple[str, str]:
 <div style="
     background:#e8f5e9;
     border-radius:8px;
-    padding:14px 14px;
+    padding:14px;
     margin-bottom:20px;
     border-left:4px solid #28a745;
     word-break:break-word;
@@ -813,6 +1089,7 @@ def build_email(analysis: dict) -> tuple[str, str]:
         font-weight:800;
         color:#1a1a1a;
         word-break:break-word;
+        overflow-wrap:anywhere;
     ">
         {top_pick}
     </p>
@@ -833,9 +1110,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 """
 
 
-    # ---------------------------------------------------------------
-    # Full Email
-    # ---------------------------------------------------------------
+    # ========================================================
+    # FULL EMAIL HTML
+    # ========================================================
 
     html = f"""<!DOCTYPE html>
 
@@ -872,7 +1149,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 >
 
 
-<!-- Outer Wrapper -->
+<!-- ======================================================== -->
+<!-- OUTER WRAPPER -->
+<!-- ======================================================== -->
 
 <table
     role="presentation"
@@ -897,7 +1176,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 >
 
 
-<!-- Main Container -->
+<!-- ======================================================== -->
+<!-- MAIN CONTAINER -->
+<!-- ======================================================== -->
 
 <table
     role="presentation"
@@ -914,9 +1195,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 >
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- HEADER -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -964,9 +1245,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- MARKET SUMMARY -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1007,9 +1288,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- TOP PICK -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1029,9 +1310,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- PRICE SNAPSHOT -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1041,6 +1322,7 @@ def build_email(analysis: dict) -> tuple[str, str]:
         padding:12px 14px 16px;
         border-left:1px solid #e0e0e0;
         border-right:1px solid #e0e0e0;
+        overflow:hidden;
     "
 >
 
@@ -1063,9 +1345,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- DIVIDER -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1083,9 +1365,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- ANALYSIS -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1116,9 +1398,9 @@ def build_email(analysis: dict) -> tuple[str, str]:
 </tr>
 
 
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 <!-- FOOTER -->
-<!-- ========================================================= -->
+<!-- ======================================================== -->
 
 <tr>
 
@@ -1149,7 +1431,8 @@ def build_email(analysis: dict) -> tuple[str, str]:
 
 </table>
 
-<!-- End Main Container -->
+<!-- END MAIN CONTAINER -->
+
 
 </td>
 
@@ -1157,7 +1440,7 @@ def build_email(analysis: dict) -> tuple[str, str]:
 
 </table>
 
-<!-- End Outer Wrapper -->
+<!-- END OUTER WRAPPER -->
 
 
 </body>
@@ -1167,6 +1450,10 @@ def build_email(analysis: dict) -> tuple[str, str]:
 
     return subject, html
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> tuple[str, str]:
 
@@ -1181,8 +1468,14 @@ def main() -> tuple[str, str]:
         INPUT_FILE.read_text()
     )
 
-    return build_email(analysis)
+    return build_email(
+        analysis
+    )
 
+
+# ============================================================
+# LOCAL EXECUTION
+# ============================================================
 
 if __name__ == "__main__":
 
@@ -1190,7 +1483,10 @@ if __name__ == "__main__":
 
     Path(
         "data/email_preview.html"
-    ).write_text(html)
+    ).write_text(
+        html,
+        encoding="utf-8",
+    )
 
     print(
         "Subject:",
