@@ -47,15 +47,13 @@ OUTPUT_FILE = Path("data/analysis.json")
 # GEMINI CONFIG (UPDATED FOR LATEST STABLE ENDPOINTS)
 # =============================================================================
 
-# Primary model (Stable workhorse)
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3.7-flash"
 
-# Fallback models (Efficient alternatives)
+# Fallback models (Kept as backup strings in case 3.7 hits a temporary peak)
 GEMINI_FALLBACK_MODELS = [
-    "gemini-3.7-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
 ]
-
 
 GEMINI_BASE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models"
