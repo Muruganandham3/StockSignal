@@ -43,18 +43,19 @@ log = logging.getLogger(__name__)
 INPUT_FILE = Path("data/news_raw.json")
 OUTPUT_FILE = Path("data/analysis.json")
 
-
 # =============================================================================
-# GEMINI CONFIG
+# GEMINI CONFIG (UPDATED FOR LATEST STABLE ENDPOINTS)
 # =============================================================================
 
-# Primary model
-GEMINI_MODEL = "gemini-3.6-flash"
+# Primary model (Stable workhorse)
+GEMINI_MODEL = "gemini-3.8-flash"
 
-# Fallback models
+# Fallback models (Efficient alternatives)
 GEMINI_FALLBACK_MODELS = [
-    "gemini-3.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
 ]
+
 
 GEMINI_BASE_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models"
