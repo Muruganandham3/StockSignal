@@ -1,204 +1,200 @@
 """
 stock_analyzer.py
-Sends fetched news + price data to Google Gemini API.
+
+Sends all fetched news + price data to the Google Gemini API in a single execution
+to bypass multi-request 429 rate limit errors on the free tier.
+
+Features:
+- Primary target: gemini-3.7-flash
+- Single-hit processing framework (no batching loops)
+- Gemini 503 high-demand retry with exponential backoff and jitter
+- Multi-model fallback execution pipeline
+- Native JSON schema enforcement
+- Deduplication and original ordering preservation
 """
 
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
-
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# =============================================================================
+# LOGGING SETUP
+# =============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 log = logging.getLogger(__name__)
 
+# =============================================================================
+# FILE CONFIGURATION
+# =============================================================================
 INPUT_FILE = Path("data/news_raw.json")
 OUTPUT_FILE = Path("data/analysis.json")
 
-# ── Model config ──────────────────────────────────────────────────────────────
-GEMINI_MODEL = " gemini-3.5-flash-lite"
-GEMINI_API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-)
+# =============================================================================
+# GEMINI ENGINE CONFIGURATION
+# =============================================================================
+# Primary stable production workhorse model
+GEMINI_MODEL = "gemini-3.7-flash"
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a senior equity research analyst specializing in Indian stock markets (NSE/BSE).
-You receive raw news items and price data, and return a structured JSON analysis.
+# Secondary resilience fallback models
+GEMINI_FALLBACK_MODELS = [
+    "gemini-3.5-flash",
+]
 
-For each news item, analyze:
-1. Fundamentals impact: How does this affect PE, EPS, revenue, EBITDA, debt/equity?
-2. Price impact: What % move is likely? Short-term (1-5 days) and medium-term (1-3 months)?
-3. Signal: BUY / HOLD / WATCH / AVOID
-4. Conviction: 1-10 score
-5. Key risks
-6. Key catalysts
+# API Endpoint Credentials
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
+BASE_URL = "https://googleapis.com"
 
-IMPORTANT: Return ONLY valid JSON matching this schema:
-{
-  "analyses": [
-    {
-      "news_id": "string",
-      "symbol": "string or null",
-      "headline": "string (your 1-line summary)",
-      "event_type": "quarterly_result | new_order | bulk_deal | corporate_action | ma_event | general",
-      "fundamentals": {
-        "eps_impact": "positive | negative | neutral | unknown",
-        "revenue_direction": "up | down | flat | unknown",
-        "margin_trend": "expanding | contracting | stable | unknown",
-        "debt_concern": true or false,
-        "commentary": "2-3 sentence analysis"
-      },
-      "price_impact": {
-        "short_term_pct_low": number,
-        "short_term_pct_high": number,
-        "medium_term_pct_low": number,
-        "medium_term_pct_high": number,
-        "rationale": "1-2 sentences"
-      },
-      "signal": "BUY | HOLD | WATCH | AVOID",
-      "conviction": number between 1 and 10,
-      "key_risks": ["string"],
-      "key_catalysts": ["string"],
-      "action_items": ["string"]
-    }
-  ],
-  "market_summary": "2-3 sentence overall market tone for the day",
-  "top_pick": "symbol or null — your single highest conviction idea today",
-  "top_pick_reason": "1 sentence"
-}"""
+# Retry Framework Policies
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 5.0  # Safe foundational backoff duration for large payloads
 
-
-def build_prompt(news_data: dict) -> str:
-    news_items   = news_data.get("news", [])
-    prices       = news_data.get("prices", {})
-    generated_at = news_data.get("generated_at", "")
-    mode         = news_data.get("mode", "")
-
-    lines = [
-        SYSTEM_PROMPT,
-        "",
-        f"Date/time: {generated_at}  |  Mode: {mode}",
-        "",
-        "=== NEWS ITEMS ===",
-    ]
-
-    for item in news_items[:30]:
-        lines.append(
-            f"\n[{item.get('id', 'N/A')}] ({str(item.get('type', '')).upper()}) {item.get('title', '')}\n"
-            f"Source: {item.get('source', '')}\n"
-            f"Symbols: {', '.join(item.get('symbols', [])) or 'unspecified'}\n"
-            f"Summary: {item.get('summary', '')}"
-        )
-
-    lines.append("\n\n=== CURRENT PRICES ===")
-    for sym, p in prices.items():
-        chg = f"{p['change_pct']:+.2f}%" if p.get("change_pct") is not None else "N/A"
-        lines.append(
-            f"{sym}: ₹{p.get('price', 'N/A')} ({chg}) | "
-            f"52W H: ₹{p.get('52w_high', 'N/A')} | L: ₹{p.get('52w_low', 'N/A')}"
-        )
-
-    lines.append(
-        "\n\nAnalyze every news item above. "
-        "Prioritize items with clear fundamental or price impact. "
-        "Return ONLY valid JSON."
-    )
-    return "\n".join(lines)
-
-
-def call_gemini(prompt: str, retries: int = 3) -> str:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable is missing.")
-
-    url = f"{GEMINI_API_URL}?key={api_key}"
+# =============================================================================
+# CORE API CORE RUNNER
+# =============================================================================
+def call_gemini_api(model_name: str, prompt: str) -> str:
+    """
+    Transmits the compiled text prompt to the Gemini API endpoint.
+    Manages transient 429 quota spikes or 503 capacity errors via exponential backoff.
+    """
+    url = f"{BASE_URL}/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
     
     payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}]
-            }
-        ],
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
         "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 8192,
             "responseMimeType": "application/json"
         }
     }
 
-    for attempt in range(1, retries + 1):
+    backoff = INITIAL_BACKOFF
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, json=payload, timeout=90)
+            log.info(f"Calling Gemini model {model_name} (attempt {attempt}/{MAX_RETRIES})...")
             
-            if resp.status_code != 200:
-                log.error("Gemini API Error (%s): %s", resp.status_code, resp.text)
-                resp.raise_for_status()
-
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                candidate = candidates[0]
-                # Check for output block / finish reason issues
-                finish_reason = candidate.get("finishReason")
-                if finish_reason not in ("STOP", None):
-                    log.warning("Generation finished with reason: %s", finish_reason)
-
-                parts = candidate.get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    return parts[0]["text"].strip()
-
-            raise ValueError(f"No valid text candidate returned: {json.dumps(data)[:200]}")
-
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else 0
-            if status in (429, 503):
-                wait = 10 * attempt
-                log.warning("Rate limit / Service unavailable (%d). Retrying in %ds...", status, wait)
-                time.sleep(wait)
+            # Using an extended 90-second timeout to handle large dataset generation tasks
+            response = requests.post(url, json=payload, headers=headers, timeout=90)
+            
+            # Successful response management
+            if response.status_code == 200:
+                res_json = response.json()
+                return res_json['candidates']['content']['parts']['text']
+            
+            # Check for high demand (503) or structural rate limits (429)
+            elif response.status_code in:
+                log.warning(f"Gemini error {response.status_code} on {model_name}: {response.text}")
+                if attempt == MAX_RETRIES:
+                    break
+                
+                # Apply randomized jitter to prevent lock-step request synchronization
+                sleep_time = backoff + random.uniform(1.0, 3.0)
+                log.warning(f"Retrying execution pipeline for {model_name} in {sleep_time:.2f} seconds...")
+                time.sleep(sleep_time)
+                backoff *= 2  # Double the backoff scale
             else:
-                raise
+                log.error(f"Unrecoverable HTTP Error {response.status_code}: {response.text}")
+                break
+                
+        except requests.exceptions.RequestException as e:
+            log.warning(f"Network transport issue on execution attempt {attempt}: {e}")
+            if attempt == MAX_RETRIES:
+                break
+            time.sleep(backoff)
+            backoff *= 2
+
+    raise RuntimeError(f"Failed to extract structured response from {model_name} after {MAX_RETRIES} attempts.")
+
+
+def generate_analysis_with_fallback(prompt: str) -> str:
+    """
+    Coordinates primary generation engine call and drops down sequentially 
+    to configured fallback alternatives if unrecoverable blocks arise.
+    """
+    models_to_try = [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
+    
+    for model in models_to_try:
+        try:
+            return call_gemini_api(model, prompt)
         except Exception as e:
-            log.warning("Gemini request failed (attempt %d/%d): %s", attempt, retries, e)
-            if attempt == retries:
-                raise
-            time.sleep(5)
-
-    raise RuntimeError("All Gemini API retries exhausted.")
+            log.error(f"Model engine {model} failed processing data: {e}. Transitioning to fallback...")
+            time.sleep(5.0)  # Quick cooldown buffer before hammering next endpoint
+            
+    raise SystemError("Critical Failure: All primary and fallback Gemini engines failed.")
 
 
-def run_analysis(news_data: dict) -> dict:
-    prompt = build_prompt(news_data)
-    log.info("Sending %d chars to Gemini (%s)...", len(prompt), GEMINI_MODEL)
-
-    raw = call_gemini(prompt)
-    result = json.loads(raw)
-    return result
-
-
+# =============================================================================
+# MAIN PIPELINE EXECUTION
+# =============================================================================
 def main():
+    # Enforce safe destination folder presence
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
     if not INPUT_FILE.exists():
-        log.error("Input file not found at %s. Run news fetcher first.", INPUT_FILE)
+        log.error(f"Execution terminated: Input dataset file not found at path '{INPUT_FILE}'.")
         return
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    news_data = json.loads(INPUT_FILE.read_text(encoding="utf-8"))
-    log.info("Analyzing %d news items...", len(news_data.get("news", [])))
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        news_data = json.load(f)
 
-    result = run_analysis(news_data)
-    result["prices"] = news_data.get("prices", {})
-    result["generated_at"] = news_data.get("generated_at")
-    result["ai_model"] = GEMINI_MODEL
+    if not isinstance(news_data, list):
+        log.error("Execution terminated: Target input data must be structured as a JSON array.")
+        return
 
-    OUTPUT_FILE.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info(
-        "Analysis saved to %s — %d items analyzed. Top pick: %s",
-        OUTPUT_FILE,
-        len(result.get("analyses", [])),
-        result.get("top_pick", "None"),
+    total_items = len(news_data)
+    log.info(f"Loaded {total_items} total news items. Processing everything in a SINGLE request hit...")
+
+    # Specialized global analytics prompt context construction
+    prompt = (
+        "You are an expert financial analyst. Analyze all of the provided news items and stock price "
+        "movements listed below. Return a valid JSON array of objects containing your complete analysis. "
+        "Do not truncate, omit, or skip items from the dataset. Each object in the array must contain "
+        "exactly these fields:\n"
+        "- 'headline': The exact matching title text analyzed.\n"
+        "- 'sentiment': State 'Bullish', 'Bearish', or 'Neutral'.\n"
+        "- 'impact_score': An integer value ranging from 1 to 10.\n"
+        "- 'summary': A concise sentence outlining the financial rationale.\n\n"
+        f"Data to analyze:\n{json.dumps(news_data, indent=2)}"
     )
+
+    try:
+        # Request analytical payload generation
+        raw_json_str = generate_analysis_with_fallback(prompt)
+        
+        # Parse structural JSON output layers safely
+        parsed_data = json.loads(raw_json_str)
+        if isinstance(parsed_data, dict) and "analysis" in parsed_data:
+            final_analyses = parsed_data["analysis"]
+        elif isinstance(parsed_data, list):
+            final_analyses = parsed_data
+        else:
+            raise ValueError("Parsed JSON payload does not match expected sequence array configurations.")
+
+        # Duplicate extraction filtering and sequence preservation step
+        seen_headlines = set()
+        clean_analyses = []
+        
+        for entry in final_analyses:
+            headline = entry.get("headline", "").strip()
+            if headline and headline not in seen_headlines:
+                seen_headlines.add(headline)
+                clean_analyses.append(entry)
+
+        # Output final clean output analysis data structures
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(clean_analyses, f, indent=2, ensure_ascii=False)
+            
+        log.info(f"Pipeline Complete: {len(clean_analyses)} items successfully processed and written to '{OUTPUT_FILE}'.")
+
+    except Exception as e:
+        log.critical(f"Pipeline breakdown on single-hit compilation or processing: {e}")
 
 
 if __name__ == "__main__":
