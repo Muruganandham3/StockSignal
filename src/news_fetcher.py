@@ -1,30 +1,48 @@
 """
-news_fetcher.py
+news_fetcher.py  (v2)
 
-Fetches stock news from multiple sources:
-- NSE/BSE announcements
-- MoneyControl RSS
-- Yahoo Finance RSS
-- Economic Times RSS
-- Business Standard RSS
+Fetches stock news / events from:
+  - NSE corporate announcements (results, board outcomes, orders, M&A ...)
+  - NSE bulk + block deals
+  - Economic Times, Business Standard, MoneyControl, Yahoo Finance (RSS)
+  - Inc42 (RSS)
+  - MarketScreener and extra Economic Times queries (via Google News RSS)
 
 Also fetches current price data from Yahoo Finance.
 
 Run by GitHub Actions at 07:30 IST every weekday.
 
 WATCHLIST behaviour:
-    - Empty dict -> BROAD mode
-        Fetch high-impact news for all NSE stocks.
-    - Non-empty dict -> FOCUSED mode
-        Fetch news related to only the configured stocks.
+    - Empty dict     -> BROAD mode   (all NSE stocks, high-impact news only)
+    - Non-empty dict -> FOCUSED mode (only the configured stocks + keywords)
+
+What changed vs v1
+------------------
+1. NSE parsing: uses `desc` + `attchmntText` + `sm_name` (v1 read a `subject`
+   field that NSE does not send, so every item was typed "general" and many
+   results announcements were filtered out).
+2. Keyword matching uses word boundaries (no more "eps" matching "steps").
+3. Company-name -> symbol resolution for RSS items in BROAD mode, using the
+   NSE equity list, so news items carry a symbol.
+4. New sources: NSE bulk/block deals, Inc42, MarketScreener, extra ET feed.
+5. RSS fetched with requests (UA + timeout) and old items are dropped.
+6. Items are ranked (results > deals > orders > ...) BEFORE any truncation.
+7. Per-source stats written to the output JSON so you can see exactly which
+   source returned what (and which one failed) without digging in logs.
 """
 
-import os
-import json
+import calendar
+import csv
 import hashlib
+import io
+import json
 import logging
+import re
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 import feedparser
 import requests
@@ -32,634 +50,612 @@ from bs4 import BeautifulSoup
 
 
 # =============================================================================
-# LOGGING
+# LOGGING / TIMEZONE
 # =============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
-
-
-# =============================================================================
-# TIMEZONE
-# =============================================================================
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # =============================================================================
-# WATCHLIST
+# CONFIG
 # =============================================================================
 
 # Leave empty for BROAD mode.
-#
-# Example:
-#
-# WATCHLIST = {
-#     "RELIANCE": "Reliance Industries",
-#     "TCS": "Tata Consultancy Services",
-#     "INFY": "Infosys",
-#     "HDFCBANK": "HDFC Bank",
-# }
-
 WATCHLIST: dict[str, str] = {
     # "RELIANCE": "Reliance Industries",
     # "TCS": "Tata Consultancy Services",
-    # "INFY": "Infosys",
-    # "HDFCBANK": "HDFC Bank",
-    # "WIPRO": "Wipro",
-    # "BAJFINANCE": "Bajaj Finance",
-    # "TATAMOTORS": "Tata Motors",
-    # "ADANIENT": "Adani Enterprises",
 }
 
 WATCHLIST_MODE = bool(WATCHLIST)
 
-
-# =============================================================================
-# OUTPUT
-# =============================================================================
-
 OUTPUT_FILE = Path("data/news_raw.json")
 
+MAX_AGE_HOURS = 36           # drop RSS items older than this
+MAX_AGE_HOURS_MONDAY = 84    # Monday run must cover the weekend
+MIN_DEAL_VALUE_INR = 1_00_00_000   # ignore bulk/block deals below Rs 1 crore
+MAX_DEALS = 40               # keep the biggest N deals
+MAX_PRICE_SYMBOLS = 60       # Yahoo lookups in BROAD mode
+MAX_ITEMS_OUT = 150          # hard cap AFTER ranking
+REQUIRE_SYMBOL_FOR_RSS = True  # BROAD mode: drop RSS items with no resolvable company
+
 
 # =============================================================================
-# RSS FEEDS
+# SOURCES
 # =============================================================================
 
+def _gnews(query: str) -> str:
+    """Google News RSS search, last 24h, India edition."""
+    return (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(f"{query} when:1d")
+        + "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+
+
+# Failing feeds are only logged; they never stop the run.
 RSS_FEEDS = [
-    "https://economictimes.indiatimes.com/markets/stocks/rss.cms",
-    "https://www.business-standard.com/rss/markets-106.rss",
-    "https://feeds.moneycontrol.com/mc/stockmarket/marketnews",
-    "https://in.finance.yahoo.com/rss/topstories",
+    {"name": "Economic Times",
+     "url": "https://economictimes.indiatimes.com/markets/stocks/rss.cms"},
+    {"name": "Economic Times (results/orders)",
+     "url": _gnews('site:economictimes.indiatimes.com '
+                   '(results OR order OR stake OR "bulk deal" OR dividend)')},
+    {"name": "Business Standard",
+     "url": "https://www.business-standard.com/rss/markets-106.rss"},
+    {"name": "MoneyControl",
+     "url": "https://feeds.moneycontrol.com/mc/stockmarket/marketnews"},
+    {"name": "Yahoo Finance India",
+     "url": "https://in.finance.yahoo.com/rss/topstories"},
+    {"name": "Inc42",
+     "url": "https://inc42.com/feed/"},
+    {"name": "MarketScreener",
+     "url": _gnews("site:marketscreener.com India")},
 ]
 
+RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml,application/xml,text/xml,*/*",
+}
 
-# =============================================================================
-# NSE API
-# =============================================================================
-
+NSE_HOME_URL = "https://www.nseindia.com/"
 NSE_ANNOUNCEMENTS_URL = (
     "https://www.nseindia.com/api/corporate-announcements"
     "?index=equities&from_date={from_dt}&to_date={to_dt}"
 )
-
-NSE_HOME_URL = "https://www.nseindia.com/"
+NSE_LARGE_DEALS_URL = "https://www.nseindia.com/api/snapshot-capital-market-largedeal"
+NSE_BULK_CSV = "https://nsearchives.nseindia.com/content/equities/bulk.csv"
+NSE_BLOCK_CSV = "https://nsearchives.nseindia.com/content/equities/block.csv"
+NSE_EQUITY_LIST_CSV = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 
 NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/151.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": RSS_HEADERS["User-Agent"],
     "Accept": "application/json,text/plain,*/*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nseindia.com/",
     "Connection": "keep-alive",
 }
 
+# NSE announcement categories (`desc`) we always keep, even if the
+# category text itself has no keyword (e.g. "Outcome of Board Meeting").
+ALWAYS_KEEP_CATEGORIES = (
+    "financial result",
+    "integrated filing",
+    "outcome of board meeting",
+    "acquisition",
+    "bagging",
+    "receiving of orders",
+    "buyback",
+    "dividend",
+    "bonus",
+    "fund raising",
+    "preferential",
+    "amalgamation",
+    "scheme of arrangement",
+)
+
+# Known brand names that are not in the NSE legal-name list.
+# Verify the symbols once; a wrong symbol only causes a failed Yahoo lookup.
+EXTRA_ALIASES = {
+    "zomato": "ETERNAL",
+    "eternal": "ETERNAL",
+    "paytm": "PAYTM",
+    "nykaa": "NYKAA",
+    "policybazaar": "POLICYBZR",
+    "swiggy": "SWIGGY",
+    "delhivery": "DELHIVERY",
+    "ola electric": "OLAELEC",
+    "wipro": "WIPRO",
+    "tcs": "TCS",
+}
+
 
 # =============================================================================
-# KEYWORDS
+# KEYWORDS / CLASSIFICATION
 # =============================================================================
 
 HIGH_IMPACT_KEYWORDS = [
     # Results / earnings
-    "quarterly result",
-    "q1",
-    "q2",
-    "q3",
-    "q4",
-    "annual result",
-    "profit",
-    "revenue",
-    "ebitda",
-    "earnings",
-    "eps",
-    "net profit",
-    "financial results",
-
+    "quarterly result", "annual result", "financial result", "result",
+    "q1", "q2", "q3", "q4", "profit", "net profit", "revenue", "ebitda",
+    "earnings", "eps", "board meeting", "integrated filing",
     # Orders / business
-    "new order",
-    "order win",
-    "order book",
-    "large order",
-    "contract",
-    "government contract",
-    "tender",
-    "award",
-
+    "new order", "order win", "order book", "large order", "order",
+    "contract", "government contract", "tender", "award", "bags", "bagged",
+    "secures", "wins",
     # Deals
-    "bulk deal",
-    "block deal",
-    "insider buying",
-    "insider selling",
-    "promoter buying",
-    "promoter selling",
-
+    "bulk deal", "block deal", "insider buying", "insider selling",
+    "promoter buying", "promoter selling", "stake sale", "open offer",
     # Corporate actions
-    "dividend",
-    "bonus",
-    "split",
-    "buyback",
-    "rights issue",
-
+    "dividend", "bonus", "split", "buyback", "rights issue",
     # M&A
-    "merger",
-    "acquisition",
-    "stake",
-    "joint venture",
-
-    # Guidance
-    "guidance",
-    "outlook",
-    "forecast",
-
+    "merger", "acquisition", "acquires", "stake", "joint venture",
+    # Guidance / analysts
+    "guidance", "outlook", "forecast", "upgrade", "downgrade",
+    "target price", "price target", "fii", "dii",
     # Fund raising / debt
-    "fund raising",
-    "fundraise",
-    "fund raising",
-    "qip",
-    "preferential issue",
-    "rights issue",
-    "debenture",
-    "bond",
-    "debt",
+    "fund raising", "fundraise", "qip", "preferential issue",
+    "debenture", "bond", "debt",
 ]
+
+_KW_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(k) for k in sorted(set(HIGH_IMPACT_KEYWORDS), key=len, reverse=True))
+    + r")s?\b",
+    re.IGNORECASE,
+)
+
+# Order matters: first match wins.
+_CLASS_RULES = [
+    ("analyst_call", r"\b(upgrade[sd]?|downgrade[sd]?|target price|price target|initiates coverage)\b"),
+    ("block_deal", r"\bblock deals?\b"),
+    ("bulk_deal", r"\b(bulk deals?|insider|promoter (?:buying|selling))\b"),
+    ("quarterly_result", r"\b(results?|financials?|earnings|net profit|profit|revenue|q[1-4])\b"),
+    ("new_order", r"\b(orders?|contracts?|tenders?|awards?|bagg\w+|secures?|wins?)\b"),
+    ("corporate_action", r"\b(dividend|bonus|split|buyback|rights issue)\b"),
+    ("ma_event", r"\b(merger|acqui\w+|stake|joint venture|open offer|amalgamation)\b"),
+    ("fund_raise", r"\b(qip|fund ?rais\w+|preferential|debentures?|ncds?)\b"),
+]
+_CLASS_RULES = [(label, re.compile(rx, re.IGNORECASE)) for label, rx in _CLASS_RULES]
+
+PRIORITY = {
+    "quarterly_result": 100,
+    "bulk_deal": 90,
+    "block_deal": 90,
+    "new_order": 80,
+    "ma_event": 80,
+    "corporate_action": 70,
+    "analyst_call": 65,
+    "fund_raise": 60,
+    "news": 40,
+    "general": 30,
+}
+
+
+def classify_announcement(text: str) -> str:
+    """Classify text (category + detail / headline) into an event type."""
+    s = _clean_text(text)
+    for label, rx in _CLASS_RULES:
+        if rx.search(s):
+            return label
+    return "general"
 
 
 # =============================================================================
 # HELPERS
 # =============================================================================
 
+SOURCE_STATS: dict[str, dict] = {}
+
+
+def _stat(name: str, **kwargs) -> dict:
+    SOURCE_STATS.setdefault(name, {}).update(kwargs)
+    return SOURCE_STATS[name]
+
+
 def _slug(text: str) -> str:
-    """
-    Stable hash for deduplication.
-    """
-    return hashlib.md5(
-        text.encode("utf-8")
-    ).hexdigest()[:12]
+    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _clean_text(value) -> str:
-    """
-    Safely convert any value to clean text.
-    """
-    if value is None:
-        return ""
-
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
-def _is_relevant(text: str) -> bool:
-    """
-    Determine whether a news item is high-impact.
+def _to_float(value) -> float:
+    try:
+        return float(str(value).replace(",", "").replace("₹", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
 
-    BROAD mode:
-        Any high-impact keyword is enough.
 
-    FOCUSED mode:
-        A watchlist symbol/company name OR high-impact keyword
-        is enough.
-    """
+def _norm(text: str) -> str:
+    t = _clean_text(text).lower().replace("&", " and ")
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-    t = _clean_text(text).lower()
 
-    has_keyword = any(
-        keyword.lower() in t
-        for keyword in HIGH_IMPACT_KEYWORDS
+_WATCH_PATTERNS = {
+    sym: re.compile(
+        r"\b(?:%s|%s)\b" % (re.escape(sym), re.escape(name)), re.IGNORECASE
     )
-
-    if not WATCHLIST_MODE:
-        # BROAD MODE
-        return has_keyword
-
-    # FOCUSED MODE
-    mentions_symbol = any(
-        sym.lower() in t or name.lower() in t
-        for sym, name in WATCHLIST.items()
-    )
-
-    return mentions_symbol or has_keyword
+    for sym, name in WATCHLIST.items()
+}
 
 
 def _mentions_watchlist(text: str) -> list[str]:
-    """
-    Return matched watchlist symbols.
-
-    In BROAD mode this returns an empty list because there is
-    no watchlist filter.
-    """
-
     if not WATCHLIST_MODE:
         return []
+    t = _clean_text(text)
+    return [sym for sym, rx in _WATCH_PATTERNS.items() if rx.search(t)]
 
-    t = _clean_text(text).lower()
 
-    return [
-        sym
-        for sym, name in WATCHLIST.items()
-        if sym.lower() in t or name.lower() in t
-    ]
+def _is_relevant(text: str) -> bool:
+    """BROAD: keyword needed. FOCUSED: watchlist mention OR keyword."""
+    t = _clean_text(text)
+    has_keyword = bool(_KW_RE.search(t))
+    if not WATCHLIST_MODE:
+        return has_keyword
+    return has_keyword or bool(_mentions_watchlist(t))
 
 
 def _extract_nse_symbol(text: str) -> str:
-    """
-    Extract an NSE symbol from a title such as:
-
-        [RELIANCE] Board Meeting
-
-    Returns:
-        RELIANCE
-
-    or:
-        ""
-    """
-
+    """'[RELIANCE] Board Meeting' -> 'RELIANCE'."""
     text = _clean_text(text)
-
     if text.startswith("[") and "]" in text:
-        return text[
-            1:text.index("]")
-        ].strip().upper()
-
+        return text[1:text.index("]")].strip().upper()
     return ""
 
 
+def _pick(row: dict, *keys: str) -> str:
+    """Case/space-insensitive lookup of the first present key."""
+    lowered = {str(k).strip().lower(): v for k, v in row.items()}
+    for key in keys:
+        val = lowered.get(key.strip().lower())
+        if val not in (None, ""):
+            return _clean_text(val)
+    return ""
+
+
+# ----- company name -> symbol (BROAD mode RSS) -------------------------------
+
+_NSE_SYMBOL_RE = re.compile(r"\b(?:NSE|BSE)\s*[:\-]\s*([A-Z0-9&\-]{2,15})\b")
+
+
+def _match_companies(text: str, name_map: dict[str, str]) -> list[str]:
+    padded = f" {_norm(text)} "
+    found: list[str] = []
+    for name, sym in name_map.items():
+        if f" {name} " in padded and sym not in found:
+            found.append(sym)
+        if len(found) >= 5:
+            break
+    for m in _NSE_SYMBOL_RE.finditer(_clean_text(text)):
+        sym = m.group(1).upper()
+        if sym not in found:
+            found.append(sym)
+    return found[:5]
+
+
+def _symbols_for_text(text: str, name_map: dict[str, str]) -> list[str]:
+    if WATCHLIST_MODE:
+        return _mentions_watchlist(text)
+    return _match_companies(text, name_map)
+
+
 # =============================================================================
-# RSS FETCHER
+# NSE SESSION
 # =============================================================================
 
-def fetch_rss_news() -> list[dict]:
-    """
-    Fetch relevant news from RSS feeds.
-    """
+def _nse_session() -> requests.Session:
+    """Session with cookies from the NSE home page (required by NSE APIs)."""
+    s = requests.Session()
+    s.headers.update(NSE_HEADERS)
+    try:
+        r = s.get(NSE_HOME_URL, timeout=15)
+        log.info("NSE homepage status: %s", r.status_code)
+    except requests.RequestException as exc:
+        log.warning("NSE homepage failed: %s", exc)
+    return s
 
-    items = []
 
-    for url in RSS_FEEDS:
-
+def _nse_get_json(session: requests.Session, url: str, retries: int = 3):
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
         try:
-            log.info("Fetching RSS: %s", url)
+            resp = session.get(url, timeout=20)
+            log.info("NSE GET %s -> %s", url.split("?")[0], resp.status_code)
+            if resp.status_code in (401, 403):
+                last_exc = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+                session.get(NSE_HOME_URL, timeout=15)   # refresh cookies
+                time.sleep(2 * attempt)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_exc = exc
+            time.sleep(2 * attempt)
+    raise last_exc  # type: ignore[misc]
 
-            feed = feedparser.parse(url)
 
-            # feedparser doesn't always throw exceptions for bad feeds.
-            if getattr(feed, "bozo", False):
-                log.warning(
-                    "RSS feed warning for %s: %s",
-                    url,
-                    getattr(feed, "bozo_exception", "unknown error"),
-                )
-
-            feed_title = getattr(
-                feed.feed,
-                "title",
-                url,
-            )
-
-            for entry in feed.entries[:50]:
-
-                title = _clean_text(
-                    entry.get("title", "")
-                )
-
-                summary = _clean_text(
-                    entry.get("summary", "")
-                )
-
-                combined = f"{title} {summary}"
-
-                if not _is_relevant(combined):
-                    continue
-
-                clean_summary = BeautifulSoup(
-                    summary,
-                    "html.parser",
-                ).get_text(
-                    separator=" ",
-                    strip=True,
-                )
-
-                # Try to identify watchlist symbols.
-                symbols = _mentions_watchlist(
-                    combined
-                )
-
-                items.append(
-                    {
-                        "id": _slug(title),
-                        "source": feed_title,
-                        "title": title,
-                        "summary": clean_summary[:500],
-                        "url": entry.get("link", ""),
-                        "published": entry.get(
-                            "published",
-                            datetime.now(IST).isoformat(),
-                        ),
-                        "symbols": symbols,
-                        "type": "news",
-                    }
-                )
-
-        except Exception as exc:
-
-            log.warning(
-                "RSS fetch failed for %s: %s",
-                url,
-                exc,
-            )
-
-    log.info(
-        "RSS: collected %d relevant items",
-        len(items),
-    )
-
-    return items
+def load_company_names(session: requests.Session) -> dict[str, str]:
+    """normalised company name -> NSE symbol (from NSE's equity list)."""
+    names: dict[str, str] = dict(EXTRA_ALIASES)
+    try:
+        resp = session.get(NSE_EQUITY_LIST_CSV, timeout=20)
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        for row in reader:
+            sym = _pick(row, "SYMBOL").upper()
+            name = _norm(_pick(row, "NAME OF COMPANY"))
+            for suffix in (" limited", " ltd"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)].strip()
+            if sym and len(name) >= 6:       # skip very short/generic names
+                names.setdefault(name, sym)
+        _stat("NSE equity list", companies=len(names))
+        log.info("Loaded %d company names", len(names))
+    except Exception as exc:
+        _stat("NSE equity list", error=str(exc)[:200])
+        log.warning("Could not load NSE equity list (%s). "
+                    "RSS items will not be symbol-matched.", exc)
+    return names
 
 
 # =============================================================================
 # NSE ANNOUNCEMENTS
 # =============================================================================
 
-def fetch_nse_announcements() -> list[dict]:
+def fetch_nse_announcements(session: requests.Session) -> list[dict]:
     """
-    Fetch NSE corporate announcements.
-
-    IMPORTANT:
-    NSE may return either:
-
-        {
-            "data": [...]
-        }
-
-    or directly:
-
-        [...]
-
-    This function handles both formats.
+    NSE fields used: symbol, sm_name, desc (category), attchmntText (detail),
+    exchdisstime / an_dt (time).
     """
-
     today = datetime.now(IST).date()
-
-    yesterday = today - timedelta(days=1)
-
+    from_date = today - timedelta(days=1)
     url = NSE_ANNOUNCEMENTS_URL.format(
-        from_dt=yesterday.strftime("%d-%m-%Y"),
+        from_dt=from_date.strftime("%d-%m-%Y"),
         to_dt=today.strftime("%d-%m-%Y"),
     )
-
-    items = []
-
-    session = requests.Session()
+    items: list[dict] = []
+    stat = _stat("NSE announcements", raw=0, kept=0, error=None)
 
     try:
-
-        log.info(
-            "Fetching NSE announcements: %s",
-            url,
-        )
-
-        # ---------------------------------------------------------------------
-        # STEP 1
-        # Get NSE homepage first to establish cookies/session.
-        # ---------------------------------------------------------------------
-
-        home_response = session.get(
-            NSE_HOME_URL,
-            headers=NSE_HEADERS,
-            timeout=15,
-        )
-
-        log.info(
-            "NSE homepage status: %s",
-            home_response.status_code,
-        )
-
-        # ---------------------------------------------------------------------
-        # STEP 2
-        # Fetch announcements.
-        # ---------------------------------------------------------------------
-
-        response = session.get(
-            url,
-            headers=NSE_HEADERS,
-            timeout=20,
-        )
-
-        log.info(
-            "NSE announcements status: %s",
-            response.status_code,
-        )
-
-        response.raise_for_status()
-
-        # ---------------------------------------------------------------------
-        # STEP 3
-        # Parse JSON.
-        # ---------------------------------------------------------------------
-
-        try:
-            data = response.json()
-
-        except ValueError as exc:
-            log.error(
-                "NSE returned invalid JSON. Response starts with: %s",
-                response.text[:500],
-            )
-            raise ValueError(
-                "NSE response was not valid JSON"
-            ) from exc
-
-        # ---------------------------------------------------------------------
-        # STEP 4
-        # IMPORTANT FIX:
-        #
-        # NSE can return either:
-        #
-        #   {"data": [...]}
-        #
-        # OR:
-        #
-        #   [...]
-        #
-        # Your previous code assumed only the first format.
-        # ---------------------------------------------------------------------
-
-        if isinstance(data, dict):
-
-            announcements = data.get(
-                "data",
-                [],
-            )
-
-        elif isinstance(data, list):
-
-            announcements = data
-
-        else:
-
-            raise ValueError(
-                "Unexpected NSE response type: "
-                f"{type(data).__name__}"
-            )
-
+        data = _nse_get_json(session, url)
+        announcements = data.get("data", []) if isinstance(data, dict) else data
         if not isinstance(announcements, list):
+            raise ValueError(f"Unexpected NSE payload: {type(announcements).__name__}")
 
-            raise ValueError(
-                "NSE announcements is not a list: "
-                f"{type(announcements).__name__}"
-            )
-
-        log.info(
-            "NSE returned %d raw announcements",
-            len(announcements),
-        )
-
-        # ---------------------------------------------------------------------
-        # STEP 5
-        # Process announcements.
-        # ---------------------------------------------------------------------
+        stat["raw"] = len(announcements)
+        log.info("NSE returned %d raw announcements", len(announcements))
+        if announcements and isinstance(announcements[0], dict):
+            log.info("NSE record keys: %s", sorted(announcements[0].keys()))
 
         for ann in announcements:
-
-            # Defensive check.
             if not isinstance(ann, dict):
-
-                log.warning(
-                    "Skipping unexpected NSE announcement: %r",
-                    ann,
-                )
-
                 continue
 
-            sym = _clean_text(
-                ann.get("symbol", "")
-            ).upper()
+            sym = _clean_text(ann.get("symbol")).upper()
+            company = _clean_text(ann.get("sm_name"))
+            category = _clean_text(ann.get("desc"))
+            detail = _clean_text(ann.get("attchmntText")) or _clean_text(ann.get("subject"))
+            combined = f"{sym} {company} {category} {detail}"
 
-            desc = _clean_text(
-                ann.get("desc", "")
-            )
-
-            subject = _clean_text(
-                ann.get("subject", "")
-            )
-
-            combined = (
-                f"{sym} "
-                f"{subject} "
-                f"{desc}"
-            )
-
-            # ---------------------------------------------------------------
-            # Relevance filtering
-            # ---------------------------------------------------------------
-
+            keep_category = any(c in category.lower() for c in ALWAYS_KEEP_CATEGORIES)
             if WATCHLIST_MODE:
-
-                # Focused mode:
-                # keep if symbol is in watchlist OR item is otherwise relevant.
-                if (
-                    sym not in WATCHLIST
-                    and not _is_relevant(combined)
-                ):
-                    continue
-
+                keep = sym in WATCHLIST or keep_category or _is_relevant(combined)
             else:
+                keep = keep_category or _is_relevant(combined)
+            if not keep:
+                continue
 
-                # Broad mode:
-                # keep high-impact announcements only.
-                if not _is_relevant(combined):
-                    continue
-
-            # ---------------------------------------------------------------
-            # Symbol
-            # ---------------------------------------------------------------
-
-            symbols = []
-
-            if sym:
-                symbols = [sym]
-
-            # ---------------------------------------------------------------
-            # Publication time
-            # ---------------------------------------------------------------
-
-            published = ann.get(
-                "exchdisstime"
+            etype = classify_announcement(f"{category} {detail}")
+            published = (
+                _clean_text(ann.get("exchdisstime"))
+                or _clean_text(ann.get("an_dt"))
+                or datetime.now(IST).isoformat()
             )
 
-            if not published:
-
-                published = datetime.now(
-                    IST
-                ).isoformat()
-
-            # ---------------------------------------------------------------
-            # Create item
-            # ---------------------------------------------------------------
-
-            items.append(
-                {
-                    "id": _slug(combined),
-                    "source": "NSE",
-                    "title": f"[{sym}] {subject}",
-                    "summary": desc[:500],
-                    "url": (
-                        "https://www.nseindia.com/"
-                        "companies-listing/"
-                        "corporate-filings-announcements"
-                    ),
-                    "published": published,
-                    "symbols": symbols,
-                    "type": classify_announcement(
-                        subject
-                    ),
-                }
-            )
-
-    except requests.exceptions.HTTPError as exc:
-
-        status = (
-            exc.response.status_code
-            if exc.response is not None
-            else 0
-        )
-
-        log.warning(
-            "NSE HTTP error (%s): %s",
-            status,
-            exc,
-        )
-
-        if exc.response is not None:
-            log.warning(
-                "NSE response: %s",
-                exc.response.text[:500],
-            )
-
-    except requests.exceptions.RequestException as exc:
-
-        log.warning(
-            "NSE request failed: %s",
-            exc,
-        )
+            items.append({
+                "id": _slug(f"nse|{sym}|{category}|{detail[:200]}|{published}"),
+                "source": "NSE",
+                "title": f"[{sym}] {category}".strip(),
+                "company": company,
+                "summary": (detail or category)[:500],
+                "url": _clean_text(ann.get("attchmntFile"))
+                       or "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+                "published": published,
+                "symbols": [sym] if sym else [],
+                "type": etype,
+            })
 
     except Exception as exc:
+        stat["error"] = str(exc)[:200]
+        log.warning("NSE announcements failed: %s", exc)
 
-        log.warning(
-            "NSE fetch failed: %s",
-            exc,
-        )
+    stat["kept"] = len(items)
+    log.info("NSE: collected %d relevant announcements", len(items))
+    return items
 
-    log.info(
-        "NSE: collected %d relevant announcements",
-        len(items),
-    )
 
+# =============================================================================
+# NSE BULK / BLOCK DEALS
+# =============================================================================
+
+def _rows_from_csv(session: requests.Session, url: str) -> list[dict]:
+    resp = session.get(url, timeout=20)
+    resp.raise_for_status()
+    return list(csv.DictReader(io.StringIO(resp.text)))
+
+
+def fetch_nse_deals(session: requests.Session) -> list[dict]:
+    """
+    Latest bulk + block deals (data is for the last trading session).
+    Primary: NSE JSON snapshot. Fallback: NSE archive CSVs.
+    """
+    stat = _stat("NSE bulk/block deals", raw=0, kept=0, error=None, via="json")
+    raw_rows: list[tuple[str, dict]] = []
+
+    try:
+        data = _nse_get_json(session, NSE_LARGE_DEALS_URL)
+        if isinstance(data, dict):
+            for key, kind in (("BULK_DEALS_DATA", "bulk"), ("BLOCK_DEALS_DATA", "block")):
+                for row in data.get(key) or []:
+                    if isinstance(row, dict):
+                        raw_rows.append((kind, row))
+    except Exception as exc:
+        stat["error"] = f"json: {str(exc)[:150]}"
+        log.warning("NSE large-deal JSON failed: %s", exc)
+
+    if not raw_rows:
+        stat["via"] = "csv"
+        for url, kind in ((NSE_BULK_CSV, "bulk"), (NSE_BLOCK_CSV, "block")):
+            try:
+                for row in _rows_from_csv(session, url):
+                    raw_rows.append((kind, row))
+            except Exception as exc:
+                prev = stat.get("error") or ""
+                stat["error"] = f"{prev} | csv {kind}: {str(exc)[:100]}".strip(" |")
+                log.warning("NSE %s deal CSV failed: %s", kind, exc)
+
+    stat["raw"] = len(raw_rows)
+    if raw_rows:
+        log.info("Deal record keys: %s", sorted(raw_rows[0][1].keys()))
+
+    deals: list[dict] = []
+    for kind, row in raw_rows:
+        sym = _pick(row, "symbol").upper()
+        if not sym:
+            continue
+        if WATCHLIST_MODE and sym not in WATCHLIST:
+            continue
+
+        qty = _to_float(_pick(row, "qty", "Quantity Traded"))
+        price = _to_float(_pick(row, "watp", "Trade Price / Wght. Avg. Price"))
+        value = qty * price
+        if value < MIN_DEAL_VALUE_INR:
+            continue
+
+        side = _pick(row, "buySell", "Buy/Sell").upper() or "?"
+        client = _pick(row, "clientName", "Client Name")
+        name = _pick(row, "name", "Security Name")
+        date = _pick(row, "date", "Date") or datetime.now(IST).date().isoformat()
+        remarks = _pick(row, "remarks", "Remarks")
+
+        deals.append({
+            "value": value,
+            "item": {
+                "id": _slug(f"{kind}|{date}|{sym}|{client}|{side}|{qty}|{price}"),
+                "source": "NSE Bulk/Block Deals",
+                "title": f"[{sym}] {kind.title()} deal: {client} {side} {int(qty):,} shares @ Rs {price:,.2f}",
+                "company": name,
+                "summary": (
+                    f"{client} {side} {int(qty):,} shares of {name or sym} at Rs {price:,.2f} "
+                    f"(about Rs {value / 1e7:,.1f} crore) on {date}."
+                    + (f" Remarks: {remarks}" if remarks and remarks != "-" else "")
+                )[:500],
+                "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+                "published": date,
+                "symbols": [sym],
+                "type": f"{kind}_deal",
+                "deal": {"side": side, "qty": qty, "price": price,
+                         "value_inr": round(value), "client": client},
+            },
+        })
+
+    deals.sort(key=lambda d: d["value"], reverse=True)
+    items = [d["item"] for d in deals[:MAX_DEALS]]
+    stat["kept"] = len(items)
+    log.info("NSE deals: collected %d deals above Rs %.1f crore",
+             len(items), MIN_DEAL_VALUE_INR / 1e7)
+    return items
+
+
+# =============================================================================
+# RSS FETCHER
+# =============================================================================
+
+def _entry_time(entry) -> datetime | None:
+    st = entry.get("published_parsed") or entry.get("updated_parsed")
+    if st:
+        return datetime.fromtimestamp(calendar.timegm(st), tz=timezone.utc)
+    return None
+
+
+def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
+    items: list[dict] = []
+    now = datetime.now(timezone.utc)
+    max_age = MAX_AGE_HOURS_MONDAY if datetime.now(IST).weekday() == 0 else MAX_AGE_HOURS
+    cutoff = now - timedelta(hours=max_age)
+    require_symbol = (not WATCHLIST_MODE) and REQUIRE_SYMBOL_FOR_RSS and bool(name_map)
+
+    for cfg in RSS_FEEDS:
+        name, url = cfg["name"], cfg["url"]
+        stat = _stat(name, entries=0, stale=0, irrelevant=0, no_symbol=0, kept=0, error=None)
+        try:
+            log.info("Fetching RSS: %s", name)
+            resp = requests.get(url, headers=RSS_HEADERS, timeout=20)
+            stat["http_status"] = resp.status_code
+            resp.raise_for_status()
+
+            feed = feedparser.parse(resp.content)
+            if getattr(feed, "bozo", False):
+                log.warning("RSS parse warning for %s: %s", name,
+                            getattr(feed, "bozo_exception", "unknown"))
+
+            entries = feed.entries[:60]
+            stat["entries"] = len(entries)
+
+            for entry in entries:
+                published_dt = _entry_time(entry)
+                if published_dt and published_dt < cutoff:
+                    stat["stale"] += 1
+                    continue
+
+                title = _clean_text(entry.get("title"))
+                raw_summary = _clean_text(entry.get("summary"))
+                summary = BeautifulSoup(raw_summary, "html.parser").get_text(
+                    separator=" ", strip=True
+                )
+                combined = f"{title} {summary}"
+
+                if not _is_relevant(combined):
+                    stat["irrelevant"] += 1
+                    continue
+
+                symbols = _symbols_for_text(combined, name_map)
+                if require_symbol and not symbols:
+                    stat["no_symbol"] += 1
+                    continue
+
+                etype = classify_announcement(combined)
+                published = (
+                    published_dt.astimezone(IST).isoformat()
+                    if published_dt
+                    else _clean_text(entry.get("published")) or datetime.now(IST).isoformat()
+                )
+
+                items.append({
+                    "id": _slug(_norm(title)),
+                    "source": name,
+                    "title": title,
+                    "summary": summary[:500],
+                    "url": _clean_text(entry.get("link")),
+                    "published": published,
+                    "symbols": symbols,
+                    "type": "news" if etype == "general" else etype,
+                })
+                stat["kept"] += 1
+
+        except Exception as exc:
+            stat["error"] = str(exc)[:200]
+            log.warning("RSS fetch failed for %s: %s", name, exc)
+
+    log.info("RSS: collected %d relevant items", len(items))
     return items
 
 
@@ -668,244 +664,56 @@ def fetch_nse_announcements() -> list[dict]:
 # =============================================================================
 
 def fetch_yahoo_finance(symbol: str) -> dict | None:
-    """
-    Fetch price information for an NSE stock using Yahoo Finance.
-
-    NSE symbols are represented as:
-
-        TCS.NS
-        RELIANCE.NS
-        INFY.NS
-    """
-
+    """Price info for an NSE stock (TCS -> TCS.NS)."""
     symbol = _clean_text(symbol).upper()
-
     if not symbol:
         return None
 
-    ticker = f"{symbol}.NS"
-
     url = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{ticker}"
-        "?interval=1d&range=5d"
+        f"{quote(symbol + '.NS')}?interval=1d&range=5d"   # quote(): M&M.NS etc.
     )
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/151.0.0.0 Safari/537.36"
-        )
-    }
-
     try:
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=15,
-        )
-
+        response = requests.get(url, headers={"User-Agent": RSS_HEADERS["User-Agent"]}, timeout=15)
         response.raise_for_status()
-
-        payload = response.json()
-
-        chart = payload.get(
-            "chart",
-            {},
-        )
-
-        results = chart.get(
-            "result"
-        )
-
+        results = (response.json().get("chart") or {}).get("result")
         if not results:
-
-            log.warning(
-                "Yahoo returned no result for %s",
-                symbol,
-            )
-
+            log.warning("Yahoo returned no result for %s", symbol)
             return None
 
         chart_data = results[0]
-
-        meta = chart_data.get(
-            "meta",
-            {},
-        )
-
-        indicators = chart_data.get(
-            "indicators",
-            {},
-        )
-
-        quote_list = indicators.get(
-            "quote",
-            [],
-        )
-
+        meta = chart_data.get("meta", {})
+        quote_list = (chart_data.get("indicators") or {}).get("quote", [])
         if not quote_list:
-
-            log.warning(
-                "Yahoo returned no quote data for %s",
-                symbol,
-            )
-
+            log.warning("Yahoo returned no quote data for %s", symbol)
             return None
 
-        closes = quote_list[0].get(
-            "close",
-            [],
-        )
-
-        closes = [
-            value
-            for value in closes
-            if value is not None
-        ]
-
-        prev_close = (
-            closes[-2]
-            if len(closes) >= 2
-            else None
-        )
-
-        curr_close = (
-            closes[-1]
-            if closes
-            else None
-        )
+        closes = [v for v in quote_list[0].get("close", []) if v is not None]
+        prev_close = closes[-2] if len(closes) >= 2 else None
+        curr_close = closes[-1] if closes else None
 
         change_pct = None
-
-        if (
-            prev_close is not None
-            and curr_close is not None
-            and prev_close != 0
-        ):
-
-            change_pct = round(
-                (
-                    (curr_close - prev_close)
-                    / prev_close
-                ) * 100,
-                2,
-            )
+        if prev_close and curr_close is not None:
+            change_pct = round((curr_close - prev_close) / prev_close * 100, 2)
 
         return {
             "symbol": symbol,
             "price": curr_close,
             "prev_close": prev_close,
             "change_pct": change_pct,
-            "52w_high": meta.get(
-                "fiftyTwoWeekHigh"
-            ),
-            "52w_low": meta.get(
-                "fiftyTwoWeekLow"
-            ),
-            "currency": meta.get(
-                "currency",
-                "INR",
-            ),
+            "52w_high": meta.get("fiftyTwoWeekHigh"),
+            "52w_low": meta.get("fiftyTwoWeekLow"),
+            "currency": meta.get("currency", "INR"),
         }
 
     except requests.exceptions.RequestException as exc:
-
-        log.warning(
-            "Yahoo request failed for %s: %s",
-            symbol,
-            exc,
-        )
-
+        log.warning("Yahoo request failed for %s: %s", symbol, exc)
     except (KeyError, IndexError, TypeError, ValueError) as exc:
-
-        log.warning(
-            "Yahoo data parsing failed for %s: %s",
-            symbol,
-            exc,
-        )
-
+        log.warning("Yahoo data parsing failed for %s: %s", symbol, exc)
     except Exception as exc:
-
-        log.warning(
-            "Yahoo fetch failed for %s: %s",
-            symbol,
-            exc,
-        )
-
+        log.warning("Yahoo fetch failed for %s: %s", symbol, exc)
     return None
-
-
-# =============================================================================
-# ANNOUNCEMENT CLASSIFICATION
-# =============================================================================
-
-def classify_announcement(subject: str) -> str:
-    """
-    Classify NSE announcement into a category.
-    """
-
-    s = _clean_text(subject).lower()
-
-    if any(
-        keyword in s
-        for keyword in [
-            "result",
-            "financial",
-            "earnings",
-            "profit",
-            "revenue",
-        ]
-    ):
-        return "quarterly_result"
-
-    if any(
-        keyword in s
-        for keyword in [
-            "order",
-            "contract",
-            "tender",
-            "award",
-        ]
-    ):
-        return "new_order"
-
-    if any(
-        keyword in s
-        for keyword in [
-            "bulk",
-            "block",
-            "insider",
-        ]
-    ):
-        return "bulk_deal"
-
-    if any(
-        keyword in s
-        for keyword in [
-            "dividend",
-            "bonus",
-            "split",
-            "buyback",
-        ]
-    ):
-        return "corporate_action"
-
-    if any(
-        keyword in s
-        for keyword in [
-            "merger",
-            "acqui",
-            "stake",
-        ]
-    ):
-        return "ma_event"
-
-    return "general"
 
 
 # =============================================================================
@@ -913,204 +721,82 @@ def classify_announcement(subject: str) -> str:
 # =============================================================================
 
 def main():
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    mode_label = "FOCUSED (watchlist)" if WATCHLIST_MODE else "BROAD (all NSE stocks)"
+    log.info("Running in %s mode", mode_label)
 
-    seen_ids: set[str] = set()
+    session = _nse_session()
+    name_map = {} if WATCHLIST_MODE else load_company_names(session)
 
+    nse_items = fetch_nse_announcements(session)
+    deal_items = fetch_nse_deals(session)
+    rss_items = fetch_rss_news(name_map)
+
+    log.info("Fetched %d NSE + %d deals + %d RSS items",
+             len(nse_items), len(deal_items), len(rss_items))
+
+    # ---- deduplicate --------------------------------------------------------
+    seen: set[str] = set()
     all_items: list[dict] = []
+    for item in nse_items + deal_items + rss_items:
+        item_id = item.get("id")
+        if item_id and item_id not in seen:
+            seen.add(item_id)
+            all_items.append(item)
 
-    # -------------------------------------------------------------------------
-    # Mode
-    # -------------------------------------------------------------------------
+    # ---- rank BEFORE truncating --------------------------------------------
+    for item in all_items:
+        item["priority"] = PRIORITY.get(item.get("type", "general"), 30)
+    all_items.sort(key=lambda i: (i["priority"], bool(i.get("symbols"))), reverse=True)
 
-    mode_label = (
-        "FOCUSED (watchlist)"
-        if WATCHLIST_MODE
-        else "BROAD (all NSE stocks)"
-    )
+    if len(all_items) > MAX_ITEMS_OUT:
+        log.info("Truncating %d -> %d items (ranked by priority)", len(all_items), MAX_ITEMS_OUT)
+        all_items = all_items[:MAX_ITEMS_OUT]
 
-    log.info(
-        "Running in %s mode",
-        mode_label,
-    )
+    log.info("Total unique news items: %d", len(all_items))
 
-    # -------------------------------------------------------------------------
-    # Fetch NSE + RSS
-    # -------------------------------------------------------------------------
-
-    nse_items = fetch_nse_announcements()
-
-    rss_items = fetch_rss_news()
-
-    log.info(
-        "Fetched %d NSE items + %d RSS items",
-        len(nse_items),
-        len(rss_items),
-    )
-
-    # -------------------------------------------------------------------------
-    # Deduplicate
-    # -------------------------------------------------------------------------
-
-    for item in nse_items + rss_items:
-
-        item_id = item.get(
-            "id"
-        )
-
-        if not item_id:
-            continue
-
-        if item_id in seen_ids:
-            continue
-
-        seen_ids.add(item_id)
-
-        all_items.append(item)
-
-    log.info(
-        "Total unique news items: %d",
-        len(all_items),
-    )
-
-    # -------------------------------------------------------------------------
-    # Decide symbols for price fetching
-    # -------------------------------------------------------------------------
-
+    # ---- symbols for price lookup ------------------------------------------
     if WATCHLIST_MODE:
-
-        # FOCUSED MODE:
-        # Always fetch every watchlist symbol.
-
-        price_symbols = set(
-            WATCHLIST.keys()
-        )
-
-        log.info(
-            "Focused mode: fetching prices for %d watchlist symbols",
-            len(price_symbols),
-        )
-
+        price_symbols = list(WATCHLIST.keys())
     else:
-
-        # BROAD MODE:
-        #
-        # Fetch prices for symbols appearing in today's news.
-        #
-        # Maximum 50 symbols to avoid hammering Yahoo Finance.
-
-        price_symbols = set()
-
-        for item in all_items:
-
-            # ---------------------------------------------------------------
-            # First: symbols explicitly provided by the news item.
-            # ---------------------------------------------------------------
-
-            symbols = item.get(
-                "symbols",
-                []
-            )
-
-            if isinstance(symbols, list):
-
-                for symbol in symbols:
-
-                    if symbol:
-                        price_symbols.add(
-                            str(symbol).strip().upper()
-                        )
-
-            # ---------------------------------------------------------------
-            # Second: extract [SYM] from NSE title.
-            # ---------------------------------------------------------------
-
-            title = _clean_text(
-                item.get("title", "")
-            )
-
-            nse_symbol = _extract_nse_symbol(
-                title
-            )
-
-            if nse_symbol:
-
-                price_symbols.add(
-                    nse_symbol
-                )
-
-        # ---------------------------------------------------------------------
-        # Cap at 50 symbols.
-        # ---------------------------------------------------------------------
-
-        price_symbols = set(
-            list(price_symbols)[:50]
-        )
-
-        log.info(
-            "Broad mode: fetching prices for %d symbols from news",
-            len(price_symbols),
-        )
-
-    # -------------------------------------------------------------------------
-    # Fetch Yahoo prices
-    # -------------------------------------------------------------------------
+        price_symbols = []
+        for item in all_items:                      # already priority-ordered
+            candidates = list(item.get("symbols") or [])
+            nse_sym = _extract_nse_symbol(item.get("title", ""))
+            if nse_sym:
+                candidates.append(nse_sym)
+            for s in candidates:
+                s = _clean_text(s).upper()
+                if s and s not in price_symbols:
+                    price_symbols.append(s)
+            if len(price_symbols) >= MAX_PRICE_SYMBOLS:
+                break
+        price_symbols = price_symbols[:MAX_PRICE_SYMBOLS]
+    log.info("Fetching prices for %d symbols", len(price_symbols))
 
     price_data: dict[str, dict] = {}
-
     for symbol in sorted(price_symbols):
-
-        data = fetch_yahoo_finance(
-            symbol
-        )
-
+        data = fetch_yahoo_finance(symbol)
         if data:
-
             price_data[symbol] = data
+        time.sleep(0.2)
 
-    # -------------------------------------------------------------------------
-    # Output
-    # -------------------------------------------------------------------------
-
+    # ---- output -------------------------------------------------------------
     output = {
-        "generated_at": datetime.now(
-            IST
-        ).isoformat(),
-
+        "generated_at": datetime.now(IST).isoformat(),
         "mode": mode_label,
-
-        "news_count": len(
-            all_items
-        ),
-
+        "news_count": len(all_items),
+        "by_type": dict(Counter(i["type"] for i in all_items)),
+        "source_stats": SOURCE_STATS,       # which source returned what / failed
         "news": all_items,
-
         "prices": price_data,
     }
 
-    OUTPUT_FILE.write_text(
-        json.dumps(
-            output,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    OUTPUT_FILE.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.info("Saved %d news items + %d price records", len(all_items), len(price_data))
+    log.info("By type: %s", output["by_type"])
 
-    log.info(
-        "Saved %d news items + %d price records",
-        len(all_items),
-        len(price_data),
-    )
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     main()
