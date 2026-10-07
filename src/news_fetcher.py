@@ -75,10 +75,11 @@ OUTPUT_FILE = Path("data/news_raw.json")
 
 MAX_AGE_HOURS = 36           # drop RSS items older than this
 MAX_AGE_HOURS_MONDAY = 84    # Monday run must cover the weekend
-MIN_DEAL_VALUE_INR = 1_00_00_000   # ignore bulk/block deals below Rs 1 crore
-MAX_DEALS = 40               # keep the biggest N deals
-MAX_PRICE_SYMBOLS = 60       # Yahoo lookups in BROAD mode
-MAX_ITEMS_OUT = 150          # hard cap AFTER ranking
+MIN_DEAL_VALUE_INR = 0       # 0 = keep every bulk/block deal (NSE lists them all)
+MAX_DEALS = 300              # safety cap only (v2 cut at 40 and hid small-cap deals)
+DEAL_MAX_AGE_DAYS = 4        # deals must be from the last session, at most this old (weekends/holidays)
+MAX_PRICE_SYMBOLS = 150      # Yahoo lookups in BROAD mode
+MAX_ITEMS_OUT = 400          # hard cap AFTER ranking
 REQUIRE_SYMBOL_FOR_RSS = False  # True = drop every RSS item with no resolvable company
 UNRESOLVED_RSS_MAX = 30         # BROAD mode: max symbol-less RSS items kept (event-type only)
 
@@ -518,14 +519,35 @@ def _rows_from_csv(session: requests.Session, url: str) -> list[dict]:
     return list(csv.DictReader(io.StringIO(resp.text)))
 
 
+def _parse_deal_date(text):
+    text = _clean_text(text)
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d-%B-%Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def fetch_nse_deals(session: requests.Session) -> list[dict]:
     """
-    Latest bulk + block deals (data is for the last trading session).
-    Primary: NSE JSON snapshot. Fallback: NSE archive CSVs.
+    Bulk + block deals of the LAST COMPLETED TRADING SESSION.
+
+    Run at 07:30 IST this is yesterday's session (Friday's on a Monday, or the
+    last session before a holiday). Only that one date is kept, so you always
+    get yesterday's full BUY/SELL flow, not a mix of days like the NSE page's
+    default "1W" filter.
+
+    Sources, first one that returns rows wins:
+      1. NSE JSON snapshot  (snapshot-capital-market-largedeal)
+      2. NSE archive CSVs   (bulk.csv / block.csv)
+      3. NSE historical API (unverified; NSE sometimes blocks it)
     """
+    today = datetime.now(IST).date()
     stat = _stat("NSE bulk/block deals", raw=0, kept=0, error=None, via="json")
     raw_rows: list[tuple[str, dict]] = []
 
+    # ---- 1. snapshot JSON ---------------------------------------------------
     try:
         data = _nse_get_json(session, NSE_LARGE_DEALS_URL)
         if isinstance(data, dict):
@@ -537,6 +559,7 @@ def fetch_nse_deals(session: requests.Session) -> list[dict]:
         stat["error"] = f"json: {str(exc)[:150]}"
         log.warning("NSE large-deal JSON failed: %s", exc)
 
+    # ---- 2. archive CSVs ----------------------------------------------------
     if not raw_rows:
         stat["via"] = "csv"
         for url, kind in ((NSE_BULK_CSV, "bulk"), (NSE_BLOCK_CSV, "block")):
@@ -548,32 +571,72 @@ def fetch_nse_deals(session: requests.Session) -> list[dict]:
                 stat["error"] = f"{prev} | csv {kind}: {str(exc)[:100]}".strip(" |")
                 log.warning("NSE %s deal CSV failed: %s", kind, exc)
 
+    # ---- 3. historical API (last resort) -----------------------------------
+    if not raw_rows:
+        stat["via"] = "historical"
+        frm = (today - timedelta(days=DEAL_MAX_AGE_DAYS)).strftime("%d-%m-%Y")
+        to = today.strftime("%d-%m-%Y")
+        for path, kind in (("bulk-deals", "bulk"), ("block-deals", "block")):
+            try:
+                url = f"https://www.nseindia.com/api/historical/{path}?from={frm}&to={to}"
+                data = _nse_get_json(session, url)
+                rows = data.get("data", []) if isinstance(data, dict) else data
+                for row in rows or []:
+                    if isinstance(row, dict):
+                        raw_rows.append((kind, row))
+            except Exception as exc:
+                prev = stat.get("error") or ""
+                stat["error"] = f"{prev} | hist {kind}: {str(exc)[:100]}".strip(" |")
+                log.warning("NSE historical %s deals failed: %s", kind, exc)
+
     stat["raw"] = len(raw_rows)
     if raw_rows:
         log.info("Deal record keys: %s", sorted(raw_rows[0][1].keys()))
 
+    # ---- keep only the last completed session ------------------------------
+    dated = [
+        (_parse_deal_date(_pick(r, "date", "Date", "BD_DT_DATE")), k, r)
+        for k, r in raw_rows
+    ]
+    parsed = [d for d, _, _ in dated if d]
+    if parsed:
+        recent = [d for d in parsed if 0 <= (today - d).days <= DEAL_MAX_AGE_DAYS]
+        if recent:
+            session_date = max(recent)
+            raw_rows = [(k, r) for d, k, r in dated if d is None or d == session_date]
+            stat["session_date"] = session_date.strftime("%d %b %Y")
+            log.info("Deals: using session %s (%d of %d rows)",
+                     stat["session_date"], len(raw_rows), len(dated))
+        else:
+            log.warning("Deals: newest date %s is older than %d days - ignoring stale data",
+                        max(parsed), DEAL_MAX_AGE_DAYS)
+            raw_rows = []
+    else:
+        log.warning("Deals: no parseable dates, keeping all %d rows", len(raw_rows))
+
     deals: list[dict] = []
     for kind, row in raw_rows:
-        sym = _pick(row, "symbol").upper()
+        sym = _pick(row, "symbol", "BD_SYMBOL").upper()
         if not sym:
             continue
         if WATCHLIST_MODE and sym not in WATCHLIST:
             continue
 
-        qty = _to_float(_pick(row, "qty", "Quantity Traded"))
-        price = _to_float(_pick(row, "watp", "Trade Price / Wght. Avg. Price"))
+        qty = _to_float(_pick(row, "qty", "Quantity Traded", "BD_QTY_TRD"))
+        price = _to_float(_pick(row, "watp", "Trade Price / Wght. Avg. Price", "BD_TP_WATP"))
         value = qty * price
         if value < MIN_DEAL_VALUE_INR:
             continue
 
-        side = _pick(row, "buySell", "Buy/Sell").upper() or "?"
-        client = _pick(row, "clientName", "Client Name")
-        name = _pick(row, "name", "Security Name")
-        date = _pick(row, "date", "Date") or datetime.now(IST).date().isoformat()
-        remarks = _pick(row, "remarks", "Remarks")
+        side = _pick(row, "buySell", "Buy/Sell", "BD_BUY_SELL").upper() or "?"
+        client = _pick(row, "clientName", "Client Name", "BD_CLIENT_NAME")
+        name = _pick(row, "name", "Security Name", "BD_SCRIP_NAME")
+        date = _pick(row, "date", "Date", "BD_DT_DATE") or datetime.now(IST).date().isoformat()
+        remarks = _pick(row, "remarks", "Remarks", "BD_REMARKS")
 
         deals.append({
             "value": value,
+            "side": side,
             "item": {
                 "id": _slug(f"{kind}|{date}|{sym}|{client}|{side}|{qty}|{price}"),
                 "source": "NSE Bulk/Block Deals",
@@ -594,10 +657,16 @@ def fetch_nse_deals(session: requests.Session) -> list[dict]:
         })
 
     deals.sort(key=lambda d: d["value"], reverse=True)
+    total = len(deals)
+    buy_cr = sum(d["value"] for d in deals if d["side"].startswith("B")) / 1e7
+    sell_cr = sum(d["value"] for d in deals if d["side"].startswith("S")) / 1e7
+    if total > MAX_DEALS:
+        log.warning("Deals: %d rows, keeping the biggest %d (MAX_DEALS)", total, MAX_DEALS)
     items = [d["item"] for d in deals[:MAX_DEALS]]
-    stat["kept"] = len(items)
-    log.info("NSE deals: collected %d deals above Rs %.1f crore",
-             len(items), MIN_DEAL_VALUE_INR / 1e7)
+    stat.update(kept=len(items), total_rows=total,
+                buy_value_cr=round(buy_cr, 1), sell_value_cr=round(sell_cr, 1))
+    log.info("NSE deals: %d kept (BUY Rs %.1f cr / SELL Rs %.1f cr)",
+             len(items), buy_cr, sell_cr)
     return items
 
 
