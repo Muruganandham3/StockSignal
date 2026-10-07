@@ -730,7 +730,17 @@ def fetch_yahoo_finance(symbol: str) -> dict | None:
             log.warning("Yahoo returned no quote data for %s", symbol)
             return None
 
-        closes = [v for v in quote_list[0].get("close", []) if v is not None]
+        timestamps = chart_data.get("timestamp") or []
+        pairs = [
+            (ts, v)
+            for ts, v in zip(timestamps, quote_list[0].get("close", []))
+            if v is not None
+        ]
+        closes = [v for _, v in pairs]
+        as_of = (
+            datetime.fromtimestamp(pairs[-1][0], tz=IST).strftime("%d %b %Y")
+            if pairs else None
+        )
         prev_close = closes[-2] if len(closes) >= 2 else None
         curr_close = closes[-1] if closes else None
 
@@ -746,6 +756,7 @@ def fetch_yahoo_finance(symbol: str) -> dict | None:
             "52w_high": meta.get("fiftyTwoWeekHigh"),
             "52w_low": meta.get("fiftyTwoWeekLow"),
             "currency": meta.get("currency", "INR"),
+            "as_of": as_of,          # date of the latest close
         }
 
     except requests.exceptions.RequestException as exc:
