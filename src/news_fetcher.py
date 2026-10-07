@@ -79,7 +79,8 @@ MIN_DEAL_VALUE_INR = 1_00_00_000   # ignore bulk/block deals below Rs 1 crore
 MAX_DEALS = 40               # keep the biggest N deals
 MAX_PRICE_SYMBOLS = 60       # Yahoo lookups in BROAD mode
 MAX_ITEMS_OUT = 150          # hard cap AFTER ranking
-REQUIRE_SYMBOL_FOR_RSS = True  # BROAD mode: drop RSS items with no resolvable company
+REQUIRE_SYMBOL_FOR_RSS = False  # True = drop every RSS item with no resolvable company
+UNRESOLVED_RSS_MAX = 30         # BROAD mode: max symbol-less RSS items kept (event-type only)
 
 
 # =============================================================================
@@ -104,10 +105,17 @@ RSS_FEEDS = [
                    '(results OR order OR stake OR "bulk deal" OR dividend)')},
     {"name": "Business Standard",
      "url": "https://www.business-standard.com/rss/markets-106.rss"},
-    {"name": "MoneyControl",
-     "url": "https://feeds.moneycontrol.com/mc/stockmarket/marketnews"},
-    {"name": "Yahoo Finance India",
-     "url": "https://in.finance.yahoo.com/rss/topstories"},
+    # Old feeds.moneycontrol.com URL returned 404 and the Yahoo India feed
+    # redirects to a search page (HTTP 500) - both removed.
+    # The MoneyControl URLs below are the classic /rss/ ones; not verified live.
+    {"name": "MoneyControl Market Reports",
+     "url": "https://www.moneycontrol.com/rss/marketreports.xml"},
+    {"name": "MoneyControl Results",
+     "url": "https://www.moneycontrol.com/rss/results.xml"},
+    {"name": "MoneyControl Buzzing Stocks",
+     "url": "https://www.moneycontrol.com/rss/buzzingstocks.xml"},
+    {"name": "Google News (India stocks)",
+     "url": _gnews('NSE stock (results OR "order win" OR "bulk deal" OR upgrade OR downgrade)')},
     {"name": "Inc42",
      "url": "https://inc42.com/feed/"},
     {"name": "MarketScreener",
@@ -325,6 +333,15 @@ def _pick(row: dict, *keys: str) -> str:
 
 _NSE_SYMBOL_RE = re.compile(r"\b(?:NSE|BSE)\s*[:\-]\s*([A-Z0-9&\-]{2,15})\b")
 
+# Filled by load_company_names(); lets short names (ITC, CIPLA ...) match as ticker tokens.
+_SYMBOLS: set[str] = set()
+_SYMBOL_STOPWORDS = {
+    "NSE", "BSE", "FII", "DII", "IPO", "GDP", "CEO", "CFO", "EPS", "QIP", "SEBI", "RBI",
+    "NIFTY", "SENSEX", "USD", "INR", "YOY", "QOQ", "ETF", "THE", "AND", "FOR", "NEW",
+    "ALL", "BUY", "SELL", "TOP", "CAN", "ONE", "NOW", "MAY", "WIN", "GET", "BIG", "LOW",
+    "HIGH", "INDIA", "LTD", "LIMITED", "PSU", "AGM", "EGM", "MD", "NCD",
+}
+
 
 def _match_companies(text: str, name_map: dict[str, str]) -> list[str]:
     padded = f" {_norm(text)} "
@@ -334,10 +351,15 @@ def _match_companies(text: str, name_map: dict[str, str]) -> list[str]:
             found.append(sym)
         if len(found) >= 5:
             break
-    for m in _NSE_SYMBOL_RE.finditer(_clean_text(text)):
+    raw = _clean_text(text)
+    for m in _NSE_SYMBOL_RE.finditer(raw):
         sym = m.group(1).upper()
         if sym not in found:
             found.append(sym)
+    if _SYMBOLS and not raw.isupper():          # skip ALL-CAPS headlines (too many false hits)
+        for tok in re.findall(r"\b[A-Z][A-Z&\-]{2,14}\b", raw):
+            if tok in _SYMBOLS and tok not in _SYMBOL_STOPWORDS and tok not in found:
+                found.append(tok)
     return found[:5]
 
 
@@ -395,8 +417,12 @@ def load_company_names(session: requests.Session) -> dict[str, str]:
             for suffix in (" limited", " ltd"):
                 if name.endswith(suffix):
                     name = name[: -len(suffix)].strip()
+            if sym:
+                _SYMBOLS.add(sym)
             if sym and len(name) >= 6:       # skip very short/generic names
                 names.setdefault(name, sym)
+            if sym and len(sym) >= 5 and sym not in _SYMBOL_STOPWORDS:
+                names.setdefault(sym.lower(), sym)   # "Cipla", "Titan", "Wipro" ...
         _stat("NSE equity list", companies=len(names))
         log.info("Loaded %d company names", len(names))
     except Exception as exc:
@@ -592,6 +618,7 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
     max_age = MAX_AGE_HOURS_MONDAY if datetime.now(IST).weekday() == 0 else MAX_AGE_HOURS
     cutoff = now - timedelta(hours=max_age)
     require_symbol = (not WATCHLIST_MODE) and REQUIRE_SYMBOL_FOR_RSS and bool(name_map)
+    unresolved = 0   # symbol-less items kept so far (shared across feeds)
 
     for cfg in RSS_FEEDS:
         name, url = cfg["name"], cfg["url"]
@@ -628,11 +655,18 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
                     continue
 
                 symbols = _symbols_for_text(combined, name_map)
-                if require_symbol and not symbols:
+                etype = classify_announcement(combined)
+                if not symbols and require_symbol:
                     stat["no_symbol"] += 1
                     continue
-
-                etype = classify_announcement(combined)
+                if not symbols and not WATCHLIST_MODE:
+                    # Keep unresolved items only if they look like a real event,
+                    # up to a cap; the AI step can still read the company name.
+                    if etype == "general" or unresolved >= UNRESOLVED_RSS_MAX:
+                        stat["no_symbol"] += 1
+                        continue
+                    unresolved += 1
+                    stat["unresolved_kept"] = stat.get("unresolved_kept", 0) + 1
                 published = (
                     published_dt.astimezone(IST).isoformat()
                     if published_dt
@@ -654,6 +688,13 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
         except Exception as exc:
             stat["error"] = str(exc)[:200]
             log.warning("RSS fetch failed for %s: %s", name, exc)
+
+        log.info(
+            "RSS %-34s http=%s entries=%s stale=%s irrelevant=%s no_symbol=%s kept=%s%s",
+            name, stat.get("http_status"), stat["entries"], stat["stale"],
+            stat["irrelevant"], stat["no_symbol"], stat["kept"],
+            f" ERROR={stat['error']}" if stat["error"] else "",
+        )
 
     log.info("RSS: collected %d relevant items", len(items))
     return items
@@ -796,6 +837,8 @@ def main():
     OUTPUT_FILE.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info("Saved %d news items + %d price records", len(all_items), len(price_data))
     log.info("By type: %s", output["by_type"])
+    for src, st in SOURCE_STATS.items():
+        log.info("SOURCE %-34s %s", src, st)
 
 
 if __name__ == "__main__":
