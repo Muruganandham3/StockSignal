@@ -31,6 +31,11 @@ MAX_NEWS_PER_STOCK = 3     # extra items are shown as "+N more"
 MAX_DESC_CHARS = 180       # length of the short description
 MAX_HEADLINE_CHARS = 140
 MAX_OTHER_NEWS = 15        # items without a stock symbol
+MAX_DEALS_PER_STOCK = 8    # bulk/block deal lines shown per stock (compact)
+MAX_EMAIL_BYTES = 95_000   # Gmail clips messages around 102 KB; shrink below this
+
+# adjusted automatically by build_email() when the email gets too big
+_LIMITS = {"news": MAX_NEWS_PER_STOCK, "deals": MAX_DEALS_PER_STOCK, "stocks": None}
 
 
 # ============================================================
@@ -117,7 +122,50 @@ def type_badge(event_type: str) -> str:
 # ONE NEWS ITEM (headline + short description + source link)
 # ============================================================
 
+def _inr_short(value) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 1e7:
+        return f"₹{v / 1e7:,.1f} cr"
+    if v >= 1e5:
+        return f"₹{v / 1e5:,.1f} L"
+    return f"₹{v:,.0f}"
+
+
+def render_deal_item(item: dict, deal: dict) -> str:
+    """One compact line per bulk/block deal, coloured by BUY / SELL."""
+    side = str(deal.get("side") or "").upper()
+    kind = "Block" if item.get("type") == "block_deal" else "Bulk"
+    if side.startswith("B"):
+        word, fg, bg = "BUY", "#2e7d32", "#e8f5e9"
+    elif side.startswith("S"):
+        word, fg, bg = "SELL", "#c62828", "#ffebee"
+    else:
+        word, fg, bg = (side or "DEAL"), "#6a1b9a", "#f3e5f5"
+
+    try:
+        qty_txt = f"{int(float(deal.get('qty') or 0)):,}"
+    except (TypeError, ValueError):
+        qty_txt = "?"
+    client = deal.get("client") or "Unknown client"
+    line = (
+        f"{_esc(client)} — {qty_txt} sh @ ₹{_num(deal.get('price'))} "
+        f"({_inr_short(deal.get('value_inr'))})"
+    )
+    return (
+        '<div style="margin:0 0 6px;line-height:1.5;word-break:break-word;overflow-wrap:anywhere;">'
+        f'<span style="background:{bg};color:{fg};padding:2px 7px;border-radius:10px;'
+        f'font-size:11px;font-weight:700;white-space:nowrap;">💼 {kind} {word}</span> '
+        f'<span style="font-size:12px;color:#222;">{line}</span></div>'
+    )
+
+
 def render_news_item(item: dict) -> str:
+    deal = item.get("deal")
+    if isinstance(deal, dict):
+        return render_deal_item(item, deal)
     headline = _headline(item)
     desc = _truncate(item.get("summary"), MAX_DESC_CHARS)
     if desc.lower() == headline.lower() or headline.lower().startswith(desc.lower()):
@@ -204,9 +252,12 @@ _TABLE_HEAD = f"""
 def render_stock_block(sym: str, price: dict, items: list[dict]) -> str:
     price_txt, chg_html, range_txt = _price_cells(price or {})
 
-    shown = items[:MAX_NEWS_PER_STOCK]
-    news_html = "".join(render_news_item(i) for i in shown)
-    extra = len(items) - len(shown)
+    deals = [i for i in items if isinstance(i.get("deal"), dict)]
+    others = [i for i in items if not isinstance(i.get("deal"), dict)]
+    shown_o = others[:_LIMITS["news"]]
+    shown_d = deals[:_LIMITS["deals"]]
+    news_html = "".join(render_news_item(i) for i in shown_o + shown_d)
+    extra = (len(others) - len(shown_o)) + (len(deals) - len(shown_d))
     if extra > 0:
         news_html += (
             f'<div style="font-size:11px;color:#888;">+{extra} more '
@@ -258,7 +309,7 @@ def render_other_news(items: list[dict]) -> str:
 # BUILD EMAIL
 # ============================================================
 
-def build_email(data: dict) -> tuple[str, str]:
+def _build_email(data: dict) -> tuple[str, str]:
     now = datetime.now(IST)
     date_str = now.strftime("%A, %d %b %Y")
 
@@ -305,6 +356,10 @@ def build_email(data: dict) -> tuple[str, str]:
         return (-_item_priority(items[0]), -move)
 
     news_symbols = sorted(by_symbol, key=sort_key)
+    hidden_stocks = 0
+    if _LIMITS.get("stocks") and len(news_symbols) > _LIMITS["stocks"]:
+        hidden_stocks = len(news_symbols) - _LIMITS["stocks"]
+        news_symbols = news_symbols[: _LIMITS["stocks"]]
     no_news = [
         (sym, p) for sym, p in sorted(prices.items())
         if sym not in by_symbol and isinstance(p, dict)
@@ -339,6 +394,14 @@ def build_email(data: dict) -> tuple[str, str]:
         render_stock_block(sym, prices.get(sym) or {}, by_symbol[sym])
         for sym in news_symbols
     )
+    if hidden_stocks:
+        blocks += (
+            '<tr><td colspan="4" style="padding:10px 6px;color:#888;font-size:12px;'
+            'border-top:2px solid #e0e0e0;">'
+            f"+{hidden_stocks} more stocks with news not shown (email size limit). "
+            "Lower-priority items are cut first; full list is in data/news_raw.json."
+            "</td></tr>"
+        )
     if not blocks:
         blocks = (
             '<tr><td colspan="4" style="padding:14px 6px;color:#777;">'
@@ -412,6 +475,25 @@ def build_email(data: dict) -> tuple[str, str]:
 </body>
 </html>
 """
+    return subject, html
+
+
+def build_email(data: dict) -> tuple[str, str]:
+    """Build the email; shrink per-stock detail if it would exceed Gmail's clip limit."""
+    levels = [
+        (MAX_NEWS_PER_STOCK, MAX_DEALS_PER_STOCK),
+        (2, 4),
+        (1, 2),
+        (1, 1),
+    ]
+    attempts = [(n, d, None) for n, d in levels]
+    attempts += [(1, 1, k) for k in (120, 90, 70, 50, 35, 25, 15)]   # then cut whole stocks
+    for news_n, deals_n, stocks_n in attempts:
+        _LIMITS.update(news=news_n, deals=deals_n, stocks=stocks_n)
+        subject, html = _build_email(data)
+        if len(html.encode("utf-8")) <= MAX_EMAIL_BYTES:
+            break
+    _LIMITS.update(news=MAX_NEWS_PER_STOCK, deals=MAX_DEALS_PER_STOCK, stocks=None)
     return subject, html
 
 
