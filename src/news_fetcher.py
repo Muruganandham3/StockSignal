@@ -1,5 +1,5 @@
 """
-news_fetcher.py  (v2)
+news_fetcher.py  (v3)
 
 Fetches stock news / events from:
   - NSE corporate announcements (results, board outcomes, orders, M&A ...)
@@ -16,19 +16,27 @@ WATCHLIST behaviour:
     - Empty dict     -> BROAD mode   (all NSE stocks, high-impact news only)
     - Non-empty dict -> FOCUSED mode (only the configured stocks + keywords)
 
+What changed vs v2
+------------------
+1. Bulk/block deals are MERGED PER STOCK: one item per symbol with net
+   BUY/SELL value and the top trades (v2 emitted one item per trade, so
+   "Bulk deal 219" was trades, not stocks).
+2. RSS parsing is tolerant: control characters and bare '&' are repaired
+   when the first parse returns no entries (fixes Economic Times = 0 entries).
+3. Output JSON now has `stocks` (one entry per stock: price + all its news),
+   `unmatched_news` (items with no resolvable symbol) and `stock_count`.
+   The email should loop over `stocks`, not over `news` or `prices`.
+4. MAX_PRICE_SYMBOLS raised so no stock silently misses a price lookup.
+
 What changed vs v1
 ------------------
-1. NSE parsing: uses `desc` + `attchmntText` + `sm_name` (v1 read a `subject`
-   field that NSE does not send, so every item was typed "general" and many
-   results announcements were filtered out).
-2. Keyword matching uses word boundaries (no more "eps" matching "steps").
-3. Company-name -> symbol resolution for RSS items in BROAD mode, using the
-   NSE equity list, so news items carry a symbol.
+1. NSE parsing: uses `desc` + `attchmntText` + `sm_name`.
+2. Keyword matching uses word boundaries.
+3. Company-name -> symbol resolution for RSS items in BROAD mode.
 4. New sources: NSE bulk/block deals, Inc42, MarketScreener, extra ET feed.
 5. RSS fetched with requests (UA + timeout) and old items are dropped.
-6. Items are ranked (results > deals > orders > ...) BEFORE any truncation.
-7. Per-source stats written to the output JSON so you can see exactly which
-   source returned what (and which one failed) without digging in logs.
+6. Items are ranked BEFORE any truncation.
+7. Per-source stats written to the output JSON.
 """
 
 import calendar
@@ -76,9 +84,9 @@ OUTPUT_FILE = Path("data/news_raw.json")
 MAX_AGE_HOURS = 36           # drop RSS items older than this
 MAX_AGE_HOURS_MONDAY = 84    # Monday run must cover the weekend
 MIN_DEAL_VALUE_INR = 0       # 0 = keep every bulk/block deal (NSE lists them all)
-MAX_DEALS = 300              # safety cap only (v2 cut at 40 and hid small-cap deals)
+MAX_DEALS = 300              # safety cap on STOCKS with deals (after per-stock merge)
 DEAL_MAX_AGE_DAYS = 4        # deals must be from the last session, at most this old (weekends/holidays)
-MAX_PRICE_SYMBOLS = 150      # Yahoo lookups in BROAD mode
+MAX_PRICE_SYMBOLS = 300      # Yahoo lookups in BROAD mode
 MAX_ITEMS_OUT = 400          # hard cap AFTER ranking
 REQUIRE_SYMBOL_FOR_RSS = False  # True = drop every RSS item with no resolvable company
 UNRESOLVED_RSS_MAX = 30         # BROAD mode: max symbol-less RSS items kept (event-type only)
@@ -108,7 +116,6 @@ RSS_FEEDS = [
      "url": "https://www.business-standard.com/rss/markets-106.rss"},
     # Old feeds.moneycontrol.com URL returned 404 and the Yahoo India feed
     # redirects to a search page (HTTP 500) - both removed.
-    # The MoneyControl URLs below are the classic /rss/ ones; not verified live.
     {"name": "MoneyControl Market Reports",
      "url": "https://www.moneycontrol.com/rss/marketreports.xml"},
     {"name": "MoneyControl Results",
@@ -531,12 +538,14 @@ def _parse_deal_date(text):
 
 def fetch_nse_deals(session: requests.Session) -> list[dict]:
     """
-    Bulk + block deals of the LAST COMPLETED TRADING SESSION.
+    Bulk + block deals of the LAST COMPLETED TRADING SESSION, merged PER STOCK.
 
     Run at 07:30 IST this is yesterday's session (Friday's on a Monday, or the
     last session before a holiday). Only that one date is kept, so you always
-    get yesterday's full BUY/SELL flow, not a mix of days like the NSE page's
-    default "1W" filter.
+    get yesterday's full BUY/SELL flow.
+
+    One item is emitted per symbol (net BUY/SELL value + top trades), so the
+    item count equals the number of stocks, not the number of trades.
 
     Sources, first one that returns rows wins:
       1. NSE JSON snapshot  (snapshot-capital-market-largedeal)
@@ -614,7 +623,8 @@ def fetch_nse_deals(session: requests.Session) -> list[dict]:
     else:
         log.warning("Deals: no parseable dates, keeping all %d rows", len(raw_rows))
 
-    deals: list[dict] = []
+    # ---- merge trades per stock --------------------------------------------
+    groups: dict[str, dict] = {}
     for kind, row in raw_rows:
         sym = _pick(row, "symbol", "BD_SYMBOL").upper()
         if not sym:
@@ -632,47 +642,71 @@ def fetch_nse_deals(session: requests.Session) -> list[dict]:
         client = _pick(row, "clientName", "Client Name", "BD_CLIENT_NAME")
         name = _pick(row, "name", "Security Name", "BD_SCRIP_NAME")
         date = _pick(row, "date", "Date", "BD_DT_DATE") or datetime.now(IST).date().isoformat()
-        remarks = _pick(row, "remarks", "Remarks", "BD_REMARKS")
 
-        deals.append({
-            "value": value,
-            "side": side,
-            "item": {
-                "id": _slug(f"{kind}|{date}|{sym}|{client}|{side}|{qty}|{price}"),
-                "source": "NSE Bulk/Block Deals",
-                "title": f"[{sym}] {kind.title()} deal: {client} {side} {int(qty):,} shares @ Rs {price:,.2f}",
-                "company": name,
-                "summary": (
-                    f"{client} {side} {int(qty):,} shares of {name or sym} at Rs {price:,.2f} "
-                    f"(about Rs {value / 1e7:,.1f} crore) on {date}."
-                    + (f" Remarks: {remarks}" if remarks and remarks != "-" else "")
-                )[:500],
-                "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
-                "published": date,
-                "symbols": [sym],
-                "type": f"{kind}_deal",
-                "deal": {"side": side, "qty": qty, "price": price,
-                         "value_inr": round(value), "client": client},
-            },
+        g = groups.setdefault(sym, {"name": name, "date": date, "kinds": set(),
+                                    "buy": 0.0, "sell": 0.0, "rows": []})
+        g["name"] = g["name"] or name
+        g["kinds"].add(kind)
+        g["buy" if side.startswith("B") else "sell"] += value
+        g["rows"].append({"kind": kind, "side": side, "client": client,
+                          "qty": qty, "price": price, "value_inr": round(value)})
+
+    ranked = sorted(groups.items(), key=lambda kv: kv[1]["buy"] + kv[1]["sell"], reverse=True)
+    if len(ranked) > MAX_DEALS:
+        log.warning("Deals: %d stocks, keeping the biggest %d (MAX_DEALS)", len(ranked), MAX_DEALS)
+
+    items: list[dict] = []
+    for sym, g in ranked[:MAX_DEALS]:
+        buy_cr, sell_cr = g["buy"] / 1e7, g["sell"] / 1e7
+        net_cr = buy_cr - sell_cr
+        bias = "net BUY" if net_cr > 0 else "net SELL" if net_cr < 0 else "balanced"
+        kind = "block" if g["kinds"] == {"block"} else "bulk"
+        top = sorted(g["rows"], key=lambda r: r["value_inr"], reverse=True)[:3]
+        top_txt = "; ".join(
+            f"{r['client']} {r['side']} {int(r['qty']):,} @ Rs {r['price']:,.2f}" for r in top
+        )
+        items.append({
+            "id": _slug(f"deals|{g['date']}|{sym}"),
+            "source": "NSE Bulk/Block Deals",
+            "title": f"[{sym}] {kind.title()} deals: {bias} Rs {abs(net_cr):,.1f} cr "
+                     f"({len(g['rows'])} trades)",
+            "company": g["name"],
+            "summary": (f"Buy Rs {buy_cr:,.1f} cr / Sell Rs {sell_cr:,.1f} cr on {g['date']}. "
+                        f"Top: {top_txt}")[:500],
+            "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+            "published": g["date"],
+            "symbols": [sym],
+            "type": f"{kind}_deal",
+            "deal": {"buy_cr": round(buy_cr, 1), "sell_cr": round(sell_cr, 1),
+                     "net_cr": round(net_cr, 1), "trades": g["rows"]},
         })
 
-    deals.sort(key=lambda d: d["value"], reverse=True)
-    total = len(deals)
-    buy_cr = sum(d["value"] for d in deals if d["side"].startswith("B")) / 1e7
-    sell_cr = sum(d["value"] for d in deals if d["side"].startswith("S")) / 1e7
-    if total > MAX_DEALS:
-        log.warning("Deals: %d rows, keeping the biggest %d (MAX_DEALS)", total, MAX_DEALS)
-    items = [d["item"] for d in deals[:MAX_DEALS]]
-    stat.update(kept=len(items), total_rows=total,
-                buy_value_cr=round(buy_cr, 1), sell_value_cr=round(sell_cr, 1))
-    log.info("NSE deals: %d kept (BUY Rs %.1f cr / SELL Rs %.1f cr)",
-             len(items), buy_cr, sell_cr)
+    tot_buy = sum(g["buy"] for g in groups.values()) / 1e7
+    tot_sell = sum(g["sell"] for g in groups.values()) / 1e7
+    stat.update(kept=len(items), total_rows=len(raw_rows), stocks=len(groups),
+                buy_value_cr=round(tot_buy, 1), sell_value_cr=round(tot_sell, 1))
+    log.info("NSE deals: %d trades -> %d stocks (BUY Rs %.1f cr / SELL Rs %.1f cr)",
+             len(raw_rows), len(items), tot_buy, tot_sell)
     return items
 
 
 # =============================================================================
 # RSS FETCHER
 # =============================================================================
+
+_BAD_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+
+
+def _parse_feed(content: bytes):
+    """Parse RSS; if that yields no entries, repair control chars / bare '&' and retry."""
+    feed = feedparser.parse(content)
+    if feed.entries:
+        return feed
+    text = content.decode("utf-8", errors="ignore")
+    text = _BARE_AMP.sub("&amp;", _BAD_XML_CHARS.sub("", text))
+    return feedparser.parse(text.encode("utf-8"))
+
 
 def _entry_time(entry) -> datetime | None:
     st = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -698,8 +732,8 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
             stat["http_status"] = resp.status_code
             resp.raise_for_status()
 
-            feed = feedparser.parse(resp.content)
-            if getattr(feed, "bozo", False):
+            feed = _parse_feed(resp.content)
+            if getattr(feed, "bozo", False) and not feed.entries:
                 log.warning("RSS parse warning for %s: %s", name,
                             getattr(feed, "bozo_exception", "unknown"))
 
@@ -838,6 +872,37 @@ def fetch_yahoo_finance(symbol: str) -> dict | None:
 
 
 # =============================================================================
+# GROUP BY STOCK
+# =============================================================================
+
+def build_stocks(items: list[dict], prices: dict) -> tuple[list[dict], list[dict]]:
+    """
+    One entry per stock (price may be None) with all its news items, ordered by
+    highest-priority event. Items with no resolved symbol go to `unmatched`.
+    """
+    stocks: dict[str, dict] = {}
+    unmatched: list[dict] = []
+    for it in items:
+        syms = it.get("symbols") or []
+        if not syms:
+            unmatched.append(it)
+            continue
+        for s in syms:
+            st = stocks.setdefault(s, {
+                "symbol": s,
+                "company": "",
+                "price": prices.get(s),       # None if Yahoo failed / unknown symbol
+                "priority": 0,
+                "news": [],
+            })
+            st["company"] = st["company"] or it.get("company", "")
+            st["priority"] = max(st["priority"], it.get("priority", 0))
+            st["news"].append(it)
+    ordered = sorted(stocks.values(), key=lambda x: x["priority"], reverse=True)
+    return ordered, unmatched
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -854,7 +919,7 @@ def main():
     deal_items = fetch_nse_deals(session)
     rss_items = fetch_rss_news(name_map)
 
-    log.info("Fetched %d NSE + %d deals + %d RSS items",
+    log.info("Fetched %d NSE + %d deal stocks + %d RSS items",
              len(nse_items), len(deal_items), len(rss_items))
 
     # ---- deduplicate --------------------------------------------------------
@@ -903,19 +968,29 @@ def main():
             price_data[symbol] = data
         time.sleep(0.2)
 
+    # ---- group by stock -----------------------------------------------------
+    stocks, unmatched = build_stocks(all_items, price_data)
+    no_price = sum(1 for s in stocks if not s["price"])
+    log.info("Stocks: %d unique (%d without price), %d unmatched news items",
+             len(stocks), no_price, len(unmatched))
+
     # ---- output -------------------------------------------------------------
     output = {
         "generated_at": datetime.now(IST).isoformat(),
         "mode": mode_label,
         "news_count": len(all_items),
+        "stock_count": len(stocks),
         "by_type": dict(Counter(i["type"] for i in all_items)),
         "source_stats": SOURCE_STATS,       # which source returned what / failed
-        "news": all_items,
+        "news": all_items,                  # flat list (kept for compatibility)
+        "stocks": stocks,                   # one entry per stock: price + all its news
+        "unmatched_news": unmatched,        # items with no resolvable symbol
         "prices": price_data,
     }
 
     OUTPUT_FILE.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info("Saved %d news items + %d price records", len(all_items), len(price_data))
+    log.info("Saved %d news items, %d stocks, %d price records",
+             len(all_items), len(stocks), len(price_data))
     log.info("By type: %s", output["by_type"])
     for src, st in SOURCE_STATS.items():
         log.info("SOURCE %-34s %s", src, st)
