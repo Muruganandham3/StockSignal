@@ -169,6 +169,9 @@ ALWAYS_KEEP_CATEGORIES = (
     "buyback",
     "dividend",
     "bonus",
+    "corporate action",
+    "sub-division",
+    "stock split",
     "fund raising",
     "preferential",
     "amalgamation",
@@ -208,7 +211,7 @@ HIGH_IMPACT_KEYWORDS = [
     "bulk deal", "block deal", "insider buying", "insider selling",
     "promoter buying", "promoter selling", "stake sale", "open offer",
     # Corporate actions
-    "dividend", "bonus", "split", "buyback", "rights issue",
+    "dividend", "bonus", "split", "stock split", "sub-division", "buyback", "rights issue",
     # M&A
     "merger", "acquisition", "acquires", "stake", "joint venture",
     # Guidance / analysts
@@ -233,7 +236,7 @@ _CLASS_RULES = [
     ("bulk_deal", r"\b(bulk deals?|insider|promoter (?:buying|selling))\b"),
     ("quarterly_result", r"\b(results?|financials?|earnings|net profit|profit|revenue|q[1-4])\b"),
     ("new_order", r"\b(orders?|contracts?|tenders?|awards?|bagg\w+|secures?|wins?)\b"),
-    ("corporate_action", r"\b(dividend|bonus|split|buyback|rights issue)\b"),
+    ("corporate_action", r"\b(dividend|bonus|split|stock split|sub-?division|buyback|rights issue)\b"),
     ("ma_event", r"\b(merger|acqui\w+|stake|joint venture|open offer|amalgamation)\b"),
     ("fund_raise", r"\b(qip|fund ?rais\w+|preferential|debentures?|ncds?)\b"),
 ]
@@ -335,6 +338,58 @@ def _pick(row: dict, *keys: str) -> str:
         if val not in (None, ""):
             return _clean_text(val)
     return ""
+
+
+# ----- freshness: only yesterday + today (Mon -> Fri..Mon, Sat/Sun -> Fri) ---
+
+def _earliest_allowed_date():
+    """Oldest IST calendar day accepted. Tue-Fri: yesterday. Mon: Friday. Sat: Fri. Sun: Fri."""
+    today = datetime.now(IST).date()
+    back = {0: 3, 5: 1, 6: 2}.get(today.weekday(), 1)
+    return today - timedelta(days=back)
+
+
+def _parse_any_dt(text):
+    """Parse NSE / ISO timestamps to an aware IST datetime, else None."""
+    text = _clean_text(text)
+    if not text:
+        return None
+    for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=IST)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=IST)
+    except ValueError:
+        return None
+
+
+_MONTHS = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+_NOISE_RE = re.compile("|".join([
+    # procedural filings that are not news
+    r"scrutini[sz]ers?'? report", r"srutinizers?'? report", r"postal ballot", r"voting results",
+    r"newspaper publication", r"transcript", r"audio recording", r"video recording",
+    r"(?:schedule|intimation) of (?:the )?(?:earnings|conference|investors?|analysts?)",
+    r"schedule of [^.]{0,40}(?:call|meet)",
+    # future result-date announcements and SEO filler
+    rf"\b{_MONTHS} \d{{1,2}} results?\b", r"ad-hoc-news\.de",
+    r"percent (?:below|above) its (?:high|low)",
+    # evergreen pages, not events
+    r"yearly results,? financial summary", r"(?:nine|six|three|quarterly|half) monthly results",
+    r"business segments and geographical", r"stocks to watch",
+]), re.IGNORECASE)
+
+# Formal NSE filings that refer to an OLD reporting period (Q1 / FY) are stale in October.
+_STALE_PERIOD_RE = re.compile(
+    rf"(?:ended|ending)\s+(?:on\s+)?(?:june|march|december)\s+\d{{1,2}},?\s+20\d\d", re.IGNORECASE)
+
+
+def _is_noise(text: str, nse: bool = False) -> bool:
+    t = _clean_text(text)
+    return bool(_NOISE_RE.search(t)) or (nse and bool(_STALE_PERIOD_RE.search(t)))
 
 
 # ----- company name -> symbol (BROAD mode RSS) -------------------------------
@@ -485,6 +540,14 @@ def fetch_nse_announcements(session: requests.Session) -> list[dict]:
             else:
                 keep = keep_category or _is_relevant(combined)
             if not keep:
+                continue
+
+            pub_dt = _parse_any_dt(_clean_text(ann.get("exchdisstime")) or _clean_text(ann.get("an_dt")))
+            if pub_dt is None or pub_dt.date() < _earliest_allowed_date():
+                stat["stale"] = stat.get("stale", 0) + 1
+                continue
+            if _is_noise(f"{category} {detail}", nse=True):
+                stat["noise"] = stat.get("noise", 0) + 1
                 continue
 
             etype = classify_announcement(f"{category} {detail}")
@@ -718,8 +781,8 @@ def _entry_time(entry) -> datetime | None:
 def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
     items: list[dict] = []
     now = datetime.now(timezone.utc)
-    max_age = MAX_AGE_HOURS_MONDAY if datetime.now(IST).weekday() == 0 else MAX_AGE_HOURS
-    cutoff = now - timedelta(hours=max_age)
+    cutoff = datetime.combine(_earliest_allowed_date(), datetime.min.time(),
+                              tzinfo=IST).astimezone(timezone.utc)
     require_symbol = (not WATCHLIST_MODE) and REQUIRE_SYMBOL_FOR_RSS and bool(name_map)
     unresolved = 0   # symbol-less items kept so far (shared across feeds)
 
@@ -742,7 +805,7 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
 
             for entry in entries:
                 published_dt = _entry_time(entry)
-                if published_dt and published_dt < cutoff:
+                if published_dt is None or published_dt < cutoff:   # undated = unknown age = drop
                     stat["stale"] += 1
                     continue
 
@@ -753,6 +816,9 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
                 )
                 combined = f"{title} {summary}"
 
+                if _is_noise(combined):
+                    stat["noise"] = stat.get("noise", 0) + 1
+                    continue
                 if not _is_relevant(combined):
                     stat["irrelevant"] += 1
                     continue
