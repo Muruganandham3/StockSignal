@@ -47,6 +47,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -873,15 +874,15 @@ def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
 # YAHOO FINANCE
 # =============================================================================
 
-def fetch_yahoo_finance(symbol: str) -> dict | None:
-    """Price info for an NSE stock (TCS -> TCS.NS)."""
+def _fetch_yahoo(symbol: str, suffix: str) -> dict | None:
+    """Price info for one Yahoo ticker (TCS + .NS -> TCS.NS)."""
     symbol = _clean_text(symbol).upper()
     if not symbol:
         return None
 
     url = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{quote(symbol + '.NS')}?interval=1d&range=5d"   # quote(): M&M.NS etc.
+        f"{quote(symbol + suffix)}?interval=1d&range=5d"   # quote(): M&M.NS etc.
     )
 
     try:
@@ -928,12 +929,28 @@ def fetch_yahoo_finance(symbol: str) -> dict | None:
             "as_of": as_of,          # date of the latest close
         }
 
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            log.debug("Yahoo 404 for %s%s", symbol, suffix)      # summarised later in main()
+        else:
+            log.warning("Yahoo request failed for %s%s: %s", symbol, suffix, exc)
     except requests.exceptions.RequestException as exc:
         log.warning("Yahoo request failed for %s: %s", symbol, exc)
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         log.warning("Yahoo data parsing failed for %s: %s", symbol, exc)
     except Exception as exc:
         log.warning("Yahoo fetch failed for %s: %s", symbol, exc)
+    return None
+
+
+def fetch_yahoo_finance(symbol: str) -> dict | None:
+    """NSE first, BSE as fallback (SME / BSE-only names are often missing as .NS)."""
+    symbol = _clean_text(symbol).upper()
+    for suffix in (".NS", ".BO"):
+        data = _fetch_yahoo(symbol, suffix)
+        if data:
+            data["exchange"] = suffix.lstrip(".")
+            return data
     return None
 
 
@@ -1028,17 +1045,34 @@ def main():
     log.info("Fetching prices for %d symbols", len(price_symbols))
 
     price_data: dict[str, dict] = {}
-    for symbol in sorted(price_symbols):
-        data = fetch_yahoo_finance(symbol)
-        if data:
-            price_data[symbol] = data
-        time.sleep(0.2)
+    ordered_syms = sorted(price_symbols)
+    with ThreadPoolExecutor(max_workers=8) as pool:          # was sequential + sleep(0.2)
+        for symbol, data in zip(ordered_syms, pool.map(fetch_yahoo_finance, ordered_syms)):
+            if data:
+                price_data[symbol] = data
+    missing = [s_ for s_ in ordered_syms if s_ not in price_data]
+    if missing:
+        log.info("No Yahoo price (NSE or BSE) for %d symbols: %s", len(missing), ", ".join(missing))
 
     # ---- group by stock -----------------------------------------------------
     stocks, unmatched = build_stocks(all_items, price_data)
     no_price = sum(1 for s in stocks if not s["price"])
     log.info("Stocks: %d unique (%d without price), %d unmatched news items",
              len(stocks), no_price, len(unmatched))
+
+    # ---- bulk/block deals: own list so the email never loses them ------------
+    bulk_deals = []
+    for it in all_items:
+        if it.get("type") in ("bulk_deal", "block_deal") and it.get("deal"):
+            sym = (it.get("symbols") or [""])[0]
+            bulk_deals.append({
+                "symbol": sym, "company": it.get("company", ""), "date": it.get("published"),
+                "kind": it["type"], "price": price_data.get(sym),
+                "buy_cr": it["deal"]["buy_cr"], "sell_cr": it["deal"]["sell_cr"],
+                "net_cr": it["deal"]["net_cr"],
+                "trades": sorted(it["deal"]["trades"], key=lambda r: r["value_inr"], reverse=True)[:5],
+            })
+    bulk_deals.sort(key=lambda d: d["buy_cr"] + d["sell_cr"], reverse=True)
 
     # ---- output -------------------------------------------------------------
     output = {
@@ -1048,6 +1082,7 @@ def main():
         "stock_count": len(stocks),
         "by_type": dict(Counter(i["type"] for i in all_items)),
         "source_stats": SOURCE_STATS,       # which source returned what / failed
+        "bulk_deals": bulk_deals,           # every bulk/block stock, biggest first, with price + trades
         "news": all_items,                  # flat list (kept for compatibility)
         "stocks": stocks,                   # one entry per stock: price + all its news
         "unmatched_news": unmatched,        # items with no resolvable symbol
