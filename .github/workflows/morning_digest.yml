@@ -15,8 +15,8 @@
 name: Stock Morning Digest
 
 on:
-  schedule:
-    - cron: "0 2 * * 1-5"   # 07:30 IST, Monday–Friday
+  # schedule:
+  #   - cron: "0 2 * * 1-5"   # 07:30 IST, Monday–Friday
   workflow_dispatch:          # Allow manual trigger from GitHub UI
 
 jobs:
