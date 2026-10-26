@@ -1,1222 +1,971 @@
 """
-stock_analyzer.py
+news_fetcher.py  (v3)
 
-Sends fetched news + price data to Google Gemini API
-and creates structured stock analysis.
+Fetches stock news / events from:
+  - NSE corporate announcements (results, board outcomes, orders, M&A ...)
+  - NSE bulk + block deals
+  - Economic Times, Business Standard, MoneyControl, Yahoo Finance (RSS)
+  - Inc42 (RSS)
+  - MarketScreener and extra Economic Times queries (via Google News RSS)
 
-Features:
-- Gemini 503 retry with exponential backoff
-- Gemini model fallback
-- Batch processing to prevent MAX_TOKENS
-- Automatic smaller-batch retry
-- JSON validation
-- Duplicate protection
-- Original news ordering
+Also fetches current price data from Yahoo Finance.
+
+Run by GitHub Actions at 07:30 IST every weekday.
+
+WATCHLIST behaviour:
+    - Empty dict     -> BROAD mode   (all NSE stocks, high-impact news only)
+    - Non-empty dict -> FOCUSED mode (only the configured stocks + keywords)
+
+What changed vs v2
+------------------
+1. Bulk/block deals are MERGED PER STOCK: one item per symbol with net
+   BUY/SELL value and the top trades (v2 emitted one item per trade, so
+   "Bulk deal 219" was trades, not stocks).
+2. RSS parsing is tolerant: control characters and bare '&' are repaired
+   when the first parse returns no entries (fixes Economic Times = 0 entries).
+3. Output JSON now has `stocks` (one entry per stock: price + all its news),
+   `unmatched_news` (items with no resolvable symbol) and `stock_count`.
+   The email should loop over `stocks`, not over `news` or `prices`.
+4. MAX_PRICE_SYMBOLS raised so no stock silently misses a price lookup.
+
+What changed vs v1
+------------------
+1. NSE parsing: uses `desc` + `attchmntText` + `sm_name`.
+2. Keyword matching uses word boundaries.
+3. Company-name -> symbol resolution for RSS items in BROAD mode.
+4. New sources: NSE bulk/block deals, Inc42, MarketScreener, extra ET feed.
+5. RSS fetched with requests (UA + timeout) and old items are dropped.
+6. Items are ranked BEFORE any truncation.
+7. Per-source stats written to the output JSON.
 """
 
+import calendar
+import csv
+import hashlib
+import io
 import json
 import logging
-import os
-import random
+import re
 import time
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
+import feedparser
 import requests
+from bs4 import BeautifulSoup
 
 
 # =============================================================================
-# LOGGING
+# LOGGING / TIMEZONE
 # =============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 
 # =============================================================================
-# FILE CONFIG
+# CONFIG
 # =============================================================================
 
-INPUT_FILE = Path("data/news_raw.json")
-OUTPUT_FILE = Path("data/analysis.json")
+# Leave empty for BROAD mode.
+WATCHLIST: dict[str, str] = {
+    # "RELIANCE": "Reliance Industries",
+    # "TCS": "Tata Consultancy Services",
+}
+
+WATCHLIST_MODE = bool(WATCHLIST)
+
+OUTPUT_FILE = Path("data/news_raw.json")
+
+MAX_AGE_HOURS = 36           # drop RSS items older than this
+MAX_AGE_HOURS_MONDAY = 84    # Monday run must cover the weekend
+MIN_DEAL_VALUE_INR = 0       # 0 = keep every bulk/block deal (NSE lists them all)
+MAX_DEALS = 300              # safety cap on STOCKS with deals (after per-stock merge)
+DEAL_MAX_AGE_DAYS = 4        # deals must be from the last session, at most this old (weekends/holidays)
+MAX_PRICE_SYMBOLS = 300      # Yahoo lookups in BROAD mode
+MAX_ITEMS_OUT = 400          # hard cap AFTER ranking
+REQUIRE_SYMBOL_FOR_RSS = False  # True = drop every RSS item with no resolvable company
+UNRESOLVED_RSS_MAX = 30         # BROAD mode: max symbol-less RSS items kept (event-type only)
+
 
 # =============================================================================
-# GEMINI CONFIG (UPDATED FOR LATEST STABLE ENDPOINTS)
+# SOURCES
 # =============================================================================
 
-GEMINI_MODEL = "gemini-3.7-flash"
+def _gnews(query: str) -> str:
+    """Google News RSS search, last 24h, India edition."""
+    return (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(f"{query} when:1d")
+        + "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
 
-# Fallback models (Kept as backup strings in case 3.7 hits a temporary peak)
-GEMINI_FALLBACK_MODELS = [
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
+
+# Failing feeds are only logged; they never stop the run.
+RSS_FEEDS = [
+    {"name": "Economic Times",
+     "url": "https://economictimes.indiatimes.com/markets/stocks/rss.cms"},
+    {"name": "Economic Times (results/orders)",
+     "url": _gnews('site:economictimes.indiatimes.com '
+                   '(results OR order OR stake OR "bulk deal" OR dividend)')},
+    {"name": "Business Standard",
+     "url": "https://www.business-standard.com/rss/markets-106.rss"},
+    # Old feeds.moneycontrol.com URL returned 404 and the Yahoo India feed
+    # redirects to a search page (HTTP 500) - both removed.
+    {"name": "MoneyControl Market Reports",
+     "url": "https://www.moneycontrol.com/rss/marketreports.xml"},
+    {"name": "MoneyControl Results",
+     "url": "https://www.moneycontrol.com/rss/results.xml"},
+    {"name": "MoneyControl Buzzing Stocks",
+     "url": "https://www.moneycontrol.com/rss/buzzingstocks.xml"},
+    {"name": "Google News (India stocks)",
+     "url": _gnews('NSE stock (results OR "order win" OR "bulk deal" OR upgrade OR downgrade)')},
+    {"name": "Inc42",
+     "url": "https://inc42.com/feed/"},
+    {"name": "MarketScreener",
+     "url": _gnews("site:marketscreener.com India")},
 ]
 
-GEMINI_BASE_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models"
+RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml,application/xml,text/xml,*/*",
+}
+
+NSE_HOME_URL = "https://www.nseindia.com/"
+NSE_ANNOUNCEMENTS_URL = (
+    "https://www.nseindia.com/api/corporate-announcements"
+    "?index=equities&from_date={from_dt}&to_date={to_dt}"
+)
+NSE_LARGE_DEALS_URL = "https://www.nseindia.com/api/snapshot-capital-market-largedeal"
+NSE_BULK_CSV = "https://nsearchives.nseindia.com/content/equities/bulk.csv"
+NSE_BLOCK_CSV = "https://nsearchives.nseindia.com/content/equities/block.csv"
+NSE_EQUITY_LIST_CSV = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+
+NSE_HEADERS = {
+    "User-Agent": RSS_HEADERS["User-Agent"],
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+    "Connection": "keep-alive",
+}
+
+# NSE announcement categories (`desc`) we always keep, even if the
+# category text itself has no keyword (e.g. "Outcome of Board Meeting").
+ALWAYS_KEEP_CATEGORIES = (
+    "financial result",
+    "integrated filing",
+    "outcome of board meeting",
+    "acquisition",
+    "bagging",
+    "receiving of orders",
+    "buyback",
+    "dividend",
+    "bonus",
+    "corporate action",
+    "sub-division",
+    "stock split",
+    "fund raising",
+    "preferential",
+    "amalgamation",
+    "scheme of arrangement",
 )
 
-# Number of retries for temporary errors
-MAX_RETRIES = 5
-
-# Number of news items per Gemini request
-#
-# 43 news items -> 6 requests:
-#
-# 8
-# 8
-# 8
-# 8
-# 8
-# 3
-#
-BATCH_SIZE = 8
-
-# Maximum Gemini output tokens per request
-MAX_OUTPUT_TOKENS = 8192
-
-# This variable will be updated after a successful Gemini request
-ACTIVE_GEMINI_MODEL = GEMINI_MODEL
-
-
-# =============================================================================
-# SYSTEM PROMPT
-# =============================================================================
-
-SYSTEM_PROMPT = """
-You are a senior equity research analyst specializing in Indian stock markets
-(NSE/BSE).
-
-You receive raw news items and price data and return structured JSON analysis.
-
-For EACH news item, analyze:
-
-1. Fundamentals impact:
-   - EPS impact
-   - Revenue direction
-   - Margin trend
-   - Debt concern
-
-2. Price impact:
-   - Short-term 1-5 days
-   - Medium-term 1-3 months
-
-3. Signal:
-   - BUY
-   - HOLD
-   - WATCH
-   - AVOID
-
-4. Conviction:
-   - 1 to 10
-
-5. Key risks
-
-6. Key catalysts
-
-7. Action items
-
-IMPORTANT RULES:
-
-- Analyze every news item provided.
-- Return exactly ONE analysis object for every news item.
-- Do not skip news items.
-- Do not invent facts that are not supported by the supplied news.
-- Keep commentary concise.
-- Keep price estimates realistic and clearly uncertain.
-- key_risks: maximum 3 items.
-- key_catalysts: maximum 3 items.
-- action_items: maximum 3 items.
-- Do not repeat the entire news article.
-- Return ONLY valid JSON.
-- Do NOT use Markdown.
-- Do NOT use ```json.
-- Do NOT include explanations outside JSON.
-
-JSON SCHEMA:
-
-{
-  "analyses": [
-    {
-      "news_id": "string",
-      "symbol": "string or null",
-      "headline": "string",
-      "event_type": "quarterly_result | new_order | bulk_deal | corporate_action | ma_event | general",
-
-      "fundamentals": {
-        "eps_impact": "positive | negative | neutral | unknown",
-        "revenue_direction": "up | down | flat | unknown",
-        "margin_trend": "expanding | contracting | stable | unknown",
-        "debt_concern": true,
-        "commentary": "short concise analysis"
-      },
-
-      "price_impact": {
-        "short_term_pct_low": 0,
-        "short_term_pct_high": 0,
-        "medium_term_pct_low": 0,
-        "medium_term_pct_high": 0,
-        "rationale": "short concise rationale"
-      },
-
-      "signal": "BUY | HOLD | WATCH | AVOID",
-
-      "conviction": 1,
-
-      "key_risks": [
-        "risk"
-      ],
-
-      "key_catalysts": [
-        "catalyst"
-      ],
-
-      "action_items": [
-        "action"
-      ]
-    }
-  ]
+# Known brand names that are not in the NSE legal-name list.
+# Verify the symbols once; a wrong symbol only causes a failed Yahoo lookup.
+EXTRA_ALIASES = {
+    "zomato": "ETERNAL",
+    "eternal": "ETERNAL",
+    "paytm": "PAYTM",
+    "nykaa": "NYKAA",
+    "policybazaar": "POLICYBZR",
+    "swiggy": "SWIGGY",
+    "delhivery": "DELHIVERY",
+    "ola electric": "OLAELEC",
+    "wipro": "WIPRO",
+    "tcs": "TCS",
 }
-"""
 
 
 # =============================================================================
-# BUILD BATCH PROMPT
+# KEYWORDS / CLASSIFICATION
 # =============================================================================
 
-def build_batch_prompt(news_data: dict, news_items: list) -> str:
-    """
-    Build a prompt for a small batch of news items.
+HIGH_IMPACT_KEYWORDS = [
+    # Results / earnings
+    "quarterly result", "annual result", "financial result", "result",
+    "q1", "q2", "q3", "q4", "profit", "net profit", "revenue", "ebitda",
+    "earnings", "eps", "board meeting", "integrated filing",
+    # Orders / business
+    "new order", "order win", "order book", "large order", "order",
+    "contract", "government contract", "tender", "award", "bags", "bagged",
+    "secures", "wins",
+    # Deals
+    "bulk deal", "block deal", "insider buying", "insider selling",
+    "promoter buying", "promoter selling", "stake sale", "open offer",
+    # Corporate actions
+    "dividend", "bonus", "split", "stock split", "sub-division", "buyback", "rights issue",
+    # M&A
+    "merger", "acquisition", "acquires", "stake", "joint venture",
+    # Guidance / analysts
+    "guidance", "outlook", "forecast", "upgrade", "downgrade",
+    "target price", "price target", "fii", "dii",
+    # Fund raising / debt
+    "fund raising", "fundraise", "qip", "preferential issue",
+    "debenture", "bond", "debt",
+]
 
-    Keeping batches small prevents Gemini from hitting MAX_TOKENS.
-    """
+_KW_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(k) for k in sorted(set(HIGH_IMPACT_KEYWORDS), key=len, reverse=True))
+    + r")s?\b",
+    re.IGNORECASE,
+)
 
-    prices = news_data.get("prices", {})
-    generated_at = news_data.get("generated_at", "")
-    mode = news_data.get("mode", "")
+# Order matters: first match wins.
+_CLASS_RULES = [
+    ("analyst_call", r"\b(upgrade[sd]?|downgrade[sd]?|target price|price target|initiates coverage)\b"),
+    ("block_deal", r"\bblock deals?\b"),
+    ("bulk_deal", r"\b(bulk deals?|insider|promoter (?:buying|selling))\b"),
+    ("quarterly_result", r"\b(results?|financials?|earnings|net profit|profit|revenue|q[1-4])\b"),
+    ("new_order", r"\b(orders?|contracts?|tenders?|awards?|bagg\w+|secures?|wins?)\b"),
+    ("corporate_action", r"\b(dividend|bonus|split|stock split|sub-?division|buyback|rights issue)\b"),
+    ("ma_event", r"\b(merger|acqui\w+|stake|joint venture|open offer|amalgamation)\b"),
+    ("fund_raise", r"\b(qip|fund ?rais\w+|preferential|debentures?|ncds?)\b"),
+]
+_CLASS_RULES = [(label, re.compile(rx, re.IGNORECASE)) for label, rx in _CLASS_RULES]
 
-    lines = [
-        SYSTEM_PROMPT,
-        "",
-        f"Date/time: {generated_at}",
-        f"Mode: {mode}",
-        "",
-        "==================================================",
-        "NEWS ITEMS",
-        "==================================================",
-    ]
+PRIORITY = {
+    "quarterly_result": 100,
+    "bulk_deal": 90,
+    "block_deal": 90,
+    "new_order": 80,
+    "ma_event": 80,
+    "corporate_action": 70,
+    "analyst_call": 65,
+    "fund_raise": 60,
+    "news": 40,
+    "general": 30,
+}
 
-    for item in news_items:
 
-        symbols = item.get("symbols", [])
-
-        if not isinstance(symbols, list):
-            symbols = [str(symbols)]
-
-        lines.append(
-            f"""
-[{item.get("id", "N/A")}] ({str(item.get("type", "")).upper()})
-
-Title:
-{item.get("title", "")}
-
-Source:
-{item.get("source", "")}
-
-Symbols:
-{", ".join(symbols) if symbols else "unspecified"}
-
-Summary:
-{item.get("summary", "")}
-
-"""
-        )
-
-    lines.append(
-        """
-==================================================
-CURRENT PRICES
-==================================================
-"""
-    )
-
-    for sym, price_data in prices.items():
-
-        change_pct = price_data.get("change_pct")
-
-        if change_pct is not None:
-
-            try:
-                change_text = f"{float(change_pct):+.2f}%"
-            except (TypeError, ValueError):
-                change_text = str(change_pct)
-
-        else:
-            change_text = "N/A"
-
-        lines.append(
-            f"{sym}: "
-            f"₹{price_data.get('price', 'N/A')} "
-            f"({change_text}) | "
-            f"52W H: ₹{price_data.get('52w_high', 'N/A')} | "
-            f"L: ₹{price_data.get('52w_low', 'N/A')}"
-        )
-
-    lines.append(
-        """
-==================================================
-INSTRUCTIONS
-==================================================
-
-Analyze EVERY news item above.
-
-Return exactly one analysis object for each news item.
-
-Keep the response concise enough to fit within the output token limit.
-
-Maximum:
-- key_risks: 3
-- key_catalysts: 3
-- action_items: 3
-
-Return ONLY valid JSON.
-"""
-    )
-
-    return "\n".join(lines)
+def classify_announcement(text: str) -> str:
+    """Classify text (category + detail / headline) into an event type."""
+    s = _clean_text(text)
+    for label, rx in _CLASS_RULES:
+        if rx.search(s):
+            return label
+    return "general"
 
 
 # =============================================================================
-# BACKOFF
+# HELPERS
 # =============================================================================
 
-def calculate_backoff(attempt: int) -> float:
-    """
-    Exponential backoff with jitter.
+SOURCE_STATS: dict[str, dict] = {}
 
-    Approximate waits:
 
-    Attempt 1 -> 5-8 sec
-    Attempt 2 -> 10-13 sec
-    Attempt 3 -> 20-23 sec
-    Attempt 4 -> 40-43 sec
-    Attempt 5 -> 60-63 sec
-    """
+def _stat(name: str, **kwargs) -> dict:
+    SOURCE_STATS.setdefault(name, {}).update(kwargs)
+    return SOURCE_STATS[name]
 
-    base = min(
-        60,
-        5 * (2 ** (attempt - 1))
-    )
 
-    jitter = random.uniform(0, 3)
+def _slug(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
-    return base + jitter
 
+def _clean_text(value) -> str:
+    return "" if value is None else str(value).strip()
 
-# =============================================================================
-# GEMINI URL
-# =============================================================================
 
-def get_gemini_url(
-    model: str,
-    api_key: str,
-) -> str:
-
-    return (
-        f"{GEMINI_BASE_URL}/"
-        f"{model}:generateContent"
-        f"?key={api_key}"
-    )
-
-
-# =============================================================================
-# CLEAN JSON RESPONSE
-# =============================================================================
-
-def clean_json_response(raw: str) -> str:
-    """
-    Remove common Markdown code fences if Gemini returns them.
-    """
-
-    raw = raw.strip()
-
-    if raw.startswith("```json"):
-        raw = raw[len("```json"):]
-
-    elif raw.startswith("```"):
-        raw = raw[len("```"):]
-
-    if raw.endswith("```"):
-        raw = raw[:-3]
-
-    return raw.strip()
-
-
-# =============================================================================
-# CALL ONE GEMINI MODEL
-# =============================================================================
-
-def call_gemini_model(
-    prompt: str,
-    model: str,
-    api_key: str,
-    retries: int = MAX_RETRIES,
-) -> str:
-
-    url = get_gemini_url(
-        model,
-        api_key,
-    )
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-            "responseMimeType": "application/json",
-        },
-    }
-
-    for attempt in range(1, retries + 1):
-
-        try:
-
-            log.info(
-                "Calling Gemini model %s (attempt %d/%d)...",
-                model,
-                attempt,
-                retries,
-            )
-
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=120,
-            )
-
-            status = response.status_code
-
-            # =================================================================
-            # SUCCESS
-            # =================================================================
-
-            if status == 200:
-
-                data = response.json()
-
-                candidates = data.get(
-                    "candidates",
-                    [],
-                )
-
-                if not candidates:
-
-                    raise ValueError(
-                        "Gemini returned no candidates: "
-                        + json.dumps(data)[:2000]
-                    )
-
-                candidate = candidates[0]
-
-                finish_reason = candidate.get(
-                    "finishReason"
-                )
-
-                if finish_reason not in (
-                    "STOP",
-                    None,
-                ):
-
-                    log.warning(
-                        "Gemini generation finished with reason: %s",
-                        finish_reason,
-                    )
-
-                # =============================================================
-                # IMPORTANT:
-                # MAX_TOKENS means response may be incomplete.
-                # Do NOT pass it directly to json.loads().
-                # Raise an error so the batch can be retried smaller.
-                # =============================================================
-
-                if finish_reason == "MAX_TOKENS":
-
-                    raise RuntimeError(
-                        "Gemini response reached MAX_TOKENS "
-                        "and may contain incomplete JSON."
-                    )
-
-                parts = (
-                    candidate
-                    .get("content", {})
-                    .get("parts", [])
-                )
-
-                if not parts:
-
-                    raise ValueError(
-                        "Gemini returned no content parts."
-                    )
-
-                text_parts = []
-
-                for part in parts:
-
-                    if "text" in part:
-
-                        text_parts.append(
-                            part["text"]
-                        )
-
-                if not text_parts:
-
-                    raise ValueError(
-                        "Gemini returned no text content."
-                    )
-
-                result = "".join(
-                    text_parts
-                ).strip()
-
-                if not result:
-
-                    raise ValueError(
-                        "Gemini returned empty text."
-                    )
-
-                log.info(
-                    "Gemini response received successfully using %s",
-                    model,
-                )
-
-                return result
-
-            # =================================================================
-            # TEMPORARY HTTP ERRORS
-            # =================================================================
-
-            if status in (
-                429,
-                500,
-                502,
-                503,
-                504,
-            ):
-
-                try:
-
-                    error_data = response.json()
-
-                    error_message = (
-                        error_data
-                        .get("error", {})
-                        .get(
-                            "message",
-                            response.text,
-                        )
-                    )
-
-                except Exception:
-
-                    error_message = response.text
-
-                log.warning(
-                    "Gemini temporary error %d on %s: %s",
-                    status,
-                    model,
-                    error_message,
-                )
-
-                if attempt < retries:
-
-                    wait = calculate_backoff(
-                        attempt
-                    )
-
-                    log.warning(
-                        "Retrying %s in %.1f seconds...",
-                        model,
-                        wait,
-                    )
-
-                    time.sleep(wait)
-
-                    continue
-
-                raise RuntimeError(
-                    f"Gemini model {model} unavailable "
-                    f"after {retries} attempts. "
-                    f"HTTP {status}: {error_message}"
-                )
-
-            # =================================================================
-            # PERMANENT HTTP ERROR
-            # =================================================================
-
-            try:
-
-                error_data = response.json()
-
-                error_message = (
-                    error_data
-                    .get("error", {})
-                    .get(
-                        "message",
-                        response.text,
-                    )
-                )
-
-            except Exception:
-
-                error_message = response.text
-
-            raise RuntimeError(
-                f"Gemini API error HTTP {status}: "
-                f"{error_message}"
-            )
-
-        # =====================================================================
-        # TIMEOUT
-        # =====================================================================
-
-        except requests.exceptions.Timeout:
-
-            log.warning(
-                "Gemini request timed out for %s "
-                "(attempt %d/%d)",
-                model,
-                attempt,
-                retries,
-            )
-
-            if attempt < retries:
-
-                wait = calculate_backoff(
-                    attempt
-                )
-
-                log.warning(
-                    "Retrying after %.1f seconds...",
-                    wait,
-                )
-
-                time.sleep(wait)
-
-                continue
-
-            raise
-
-        # =====================================================================
-        # CONNECTION ERROR
-        # =====================================================================
-
-        except requests.exceptions.ConnectionError as e:
-
-            log.warning(
-                "Gemini connection error for %s: %s",
-                model,
-                e,
-            )
-
-            if attempt < retries:
-
-                wait = calculate_backoff(
-                    attempt
-                )
-
-                log.warning(
-                    "Retrying after %.1f seconds...",
-                    wait,
-                )
-
-                time.sleep(wait)
-
-                continue
-
-            raise
-
-        # =====================================================================
-        # MAX TOKENS / OTHER RETRYABLE GENERATION ERROR
-        # =====================================================================
-
-        except RuntimeError as e:
-
-            error_text = str(e)
-
-            if "MAX_TOKENS" in error_text:
-
-                log.warning(
-                    "Gemini %s reached MAX_TOKENS.",
-                    model,
-                )
-
-                # Do NOT repeatedly retry the exact same oversized
-                # request. The caller will reduce the batch size.
-                raise
-
-            raise
-
-    raise RuntimeError(
-        f"All retries exhausted for Gemini model {model}."
-    )
-
-
-# =============================================================================
-# GEMINI CALL WITH FALLBACK MODELS
-# =============================================================================
-
-def call_gemini(prompt: str) -> str:
-
-    global ACTIVE_GEMINI_MODEL
-
-    api_key = os.environ.get(
-        "GEMINI_API_KEY"
-    )
-
-    if not api_key:
-
-        raise ValueError(
-            "GEMINI_API_KEY environment variable is missing."
-        )
-
-    models_to_try = [
-        GEMINI_MODEL,
-        *GEMINI_FALLBACK_MODELS,
-    ]
-
-    # Remove duplicates
-    models_to_try = list(
-        dict.fromkeys(models_to_try)
-    )
-
-    last_error = None
-
-    for model in models_to_try:
-
-        log.info(
-            "Trying Gemini model: %s",
-            model,
-        )
-
-        try:
-
-            result = call_gemini_model(
-                prompt=prompt,
-                model=model,
-                api_key=api_key,
-                retries=MAX_RETRIES,
-            )
-
-            ACTIVE_GEMINI_MODEL = model
-
-            return result
-
-        except RuntimeError as e:
-
-            last_error = e
-
-            # MAX_TOKENS should be handled by batch-size reduction,
-            # NOT by switching models immediately.
-            if "MAX_TOKENS" in str(e):
-
-                raise
-
-            log.error(
-                "Gemini model %s failed: %s",
-                model,
-                e,
-            )
-
-            log.info(
-                "Trying next Gemini fallback model..."
-            )
-
-        except Exception as e:
-
-            last_error = e
-
-            log.error(
-                "Gemini model %s failed: %s",
-                model,
-                e,
-            )
-
-            log.info(
-                "Trying next Gemini fallback model..."
-            )
-
-    raise RuntimeError(
-        "All Gemini models failed. "
-        f"Last error: {last_error}"
-    )
-
-
-# =============================================================================
-# ANALYZE ONE BATCH
-# =============================================================================
-
-def analyze_batch(
-    news_data: dict,
-    news_items: list,
-) -> dict:
-
-    prompt = build_batch_prompt(
-        news_data,
-        news_items,
-    )
-
-    log.info(
-        "Analyzing batch of %d news items (%d chars)...",
-        len(news_items),
-        len(prompt),
-    )
-
-    raw = call_gemini(
-        prompt
-    )
-
-    raw = clean_json_response(
-        raw
-    )
-
+def _to_float(value) -> float:
     try:
+        return float(str(value).replace(",", "").replace("₹", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
 
-        result = json.loads(
-            raw
-        )
 
-    except json.JSONDecodeError as e:
+def _norm(text: str) -> str:
+    t = _clean_text(text).lower().replace("&", " and ")
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-        log.error(
-            "Invalid JSON from Gemini batch."
-        )
 
-        log.error(
-            "JSON error: %s",
-            e,
-        )
-
-        log.error(
-            "Raw response preview:\n%s",
-            raw[:5000],
-        )
-
-        raise
-
-    if not isinstance(result, dict):
-
-        raise ValueError(
-            "Gemini response is not a JSON object."
-        )
-
-    analyses = result.get(
-        "analyses"
+_WATCH_PATTERNS = {
+    sym: re.compile(
+        r"\b(?:%s|%s)\b" % (re.escape(sym), re.escape(name)), re.IGNORECASE
     )
-
-    if not isinstance(
-        analyses,
-        list,
-    ):
-
-        raise ValueError(
-            "Gemini response does not contain "
-            "an 'analyses' array."
-        )
-
-    return result
+    for sym, name in WATCHLIST.items()
+}
 
 
-# =============================================================================
-# ANALYZE WITH AUTOMATIC BATCH REDUCTION
-# =============================================================================
-
-def analyze_batch_with_retry(
-    news_data: dict,
-    news_items: list,
-) -> list:
-
-    """
-    Analyze a batch.
-
-    If Gemini reaches MAX_TOKENS or returns invalid JSON,
-    split the batch into smaller pieces.
-
-    Example:
-
-    8 items
-       ↓
-    MAX_TOKENS
-       ↓
-    4 + 4
-       ↓
-    success
-    """
-
-    if not news_items:
-
+def _mentions_watchlist(text: str) -> list[str]:
+    if not WATCHLIST_MODE:
         return []
+    t = _clean_text(text)
+    return [sym for sym, rx in _WATCH_PATTERNS.items() if rx.search(t)]
+
+
+def _is_relevant(text: str) -> bool:
+    """BROAD: keyword needed. FOCUSED: watchlist mention OR keyword."""
+    t = _clean_text(text)
+    has_keyword = bool(_KW_RE.search(t))
+    if not WATCHLIST_MODE:
+        return has_keyword
+    return has_keyword or bool(_mentions_watchlist(t))
+
+
+def _extract_nse_symbol(text: str) -> str:
+    """'[RELIANCE] Board Meeting' -> 'RELIANCE'."""
+    text = _clean_text(text)
+    if text.startswith("[") and "]" in text:
+        return text[1:text.index("]")].strip().upper()
+    return ""
+
+
+def _pick(row: dict, *keys: str) -> str:
+    """Case/space-insensitive lookup of the first present key."""
+    lowered = {str(k).strip().lower(): v for k, v in row.items()}
+    for key in keys:
+        val = lowered.get(key.strip().lower())
+        if val not in (None, ""):
+            return _clean_text(val)
+    return ""
+
+
+# ----- freshness: only yesterday + today (Mon -> Fri..Mon, Sat/Sun -> Fri) ---
+
+def _earliest_allowed_date():
+    """Oldest IST calendar day accepted. Tue-Fri: yesterday. Mon: Friday. Sat: Fri. Sun: Fri."""
+    today = datetime.now(IST).date()
+    back = {0: 3, 5: 1, 6: 2}.get(today.weekday(), 1)
+    return today - timedelta(days=back)
+
+
+def _parse_any_dt(text):
+    """Parse NSE / ISO timestamps to an aware IST datetime, else None."""
+    text = _clean_text(text)
+    if not text:
+        return None
+    for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=IST)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=IST)
+    except ValueError:
+        return None
+
+
+_MONTHS = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+_NOISE_RE = re.compile("|".join([
+    # procedural filings that are not news
+    r"scrutini[sz]ers?'? report", r"srutinizers?'? report", r"postal ballot", r"voting results",
+    r"newspaper publication", r"transcript", r"audio recording", r"video recording",
+    r"(?:schedule|intimation) of (?:the )?(?:earnings|conference|investors?|analysts?)",
+    r"schedule of [^.]{0,40}(?:call|meet)",
+    # future result-date announcements and SEO filler
+    rf"\b{_MONTHS} \d{{1,2}} results?\b", r"ad-hoc-news\.de",
+    r"percent (?:below|above) its (?:high|low)",
+    # evergreen pages, not events
+    r"yearly results,? financial summary", r"(?:nine|six|three|quarterly|half) monthly results",
+    r"business segments and geographical", r"stocks to watch",
+]), re.IGNORECASE)
+
+# Formal NSE filings that refer to an OLD reporting period (Q1 / FY) are stale in October.
+_STALE_PERIOD_RE = re.compile(
+    rf"(?:ended|ending)\s+(?:on\s+)?(?:june|march|december)\s+\d{{1,2}},?\s+20\d\d", re.IGNORECASE)
+
+
+def _is_noise(text: str, nse: bool = False) -> bool:
+    t = _clean_text(text)
+    return bool(_NOISE_RE.search(t)) or (nse and bool(_STALE_PERIOD_RE.search(t)))
+
+
+# ----- company name -> symbol (BROAD mode RSS) -------------------------------
+
+_NSE_SYMBOL_RE = re.compile(r"\b(?:NSE|BSE)\s*[:\-]\s*([A-Z0-9&\-]{2,15})\b")
+
+# Filled by load_company_names(); lets short names (ITC, CIPLA ...) match as ticker tokens.
+_SYMBOLS: set[str] = set()
+_SYMBOL_STOPWORDS = {
+    "NSE", "BSE", "FII", "DII", "IPO", "GDP", "CEO", "CFO", "EPS", "QIP", "SEBI", "RBI",
+    "NIFTY", "SENSEX", "USD", "INR", "YOY", "QOQ", "ETF", "THE", "AND", "FOR", "NEW",
+    "ALL", "BUY", "SELL", "TOP", "CAN", "ONE", "NOW", "MAY", "WIN", "GET", "BIG", "LOW",
+    "HIGH", "INDIA", "LTD", "LIMITED", "PSU", "AGM", "EGM", "MD", "NCD",
+}
+
+
+def _match_companies(text: str, name_map: dict[str, str]) -> list[str]:
+    padded = f" {_norm(text)} "
+    found: list[str] = []
+    for name, sym in name_map.items():
+        if f" {name} " in padded and sym not in found:
+            found.append(sym)
+        if len(found) >= 5:
+            break
+    raw = _clean_text(text)
+    for m in _NSE_SYMBOL_RE.finditer(raw):
+        sym = m.group(1).upper()
+        if sym not in found:
+            found.append(sym)
+    if _SYMBOLS and not raw.isupper():          # skip ALL-CAPS headlines (too many false hits)
+        for tok in re.findall(r"\b[A-Z][A-Z&\-]{2,14}\b", raw):
+            if tok in _SYMBOLS and tok not in _SYMBOL_STOPWORDS and tok not in found:
+                found.append(tok)
+    return found[:5]
+
+
+def _symbols_for_text(text: str, name_map: dict[str, str]) -> list[str]:
+    if WATCHLIST_MODE:
+        return _mentions_watchlist(text)
+    return _match_companies(text, name_map)
+
+
+# =============================================================================
+# NSE SESSION
+# =============================================================================
+
+def _nse_session() -> requests.Session:
+    """Session with cookies from the NSE home page (required by NSE APIs)."""
+    s = requests.Session()
+    s.headers.update(NSE_HEADERS)
+    try:
+        r = s.get(NSE_HOME_URL, timeout=15)
+        log.info("NSE homepage status: %s", r.status_code)
+    except requests.RequestException as exc:
+        log.warning("NSE homepage failed: %s", exc)
+    return s
+
+
+def _nse_get_json(session: requests.Session, url: str, retries: int = 3):
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = session.get(url, timeout=20)
+            log.info("NSE GET %s -> %s", url.split("?")[0], resp.status_code)
+            if resp.status_code in (401, 403):
+                last_exc = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+                session.get(NSE_HOME_URL, timeout=15)   # refresh cookies
+                time.sleep(2 * attempt)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_exc = exc
+            time.sleep(2 * attempt)
+    raise last_exc  # type: ignore[misc]
+
+
+def load_company_names(session: requests.Session) -> dict[str, str]:
+    """normalised company name -> NSE symbol (from NSE's equity list)."""
+    names: dict[str, str] = dict(EXTRA_ALIASES)
+    try:
+        resp = session.get(NSE_EQUITY_LIST_CSV, timeout=20)
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        for row in reader:
+            sym = _pick(row, "SYMBOL").upper()
+            name = _norm(_pick(row, "NAME OF COMPANY"))
+            for suffix in (" limited", " ltd"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)].strip()
+            if sym:
+                _SYMBOLS.add(sym)
+            if sym and len(name) >= 6:       # skip very short/generic names
+                names.setdefault(name, sym)
+            if sym and len(sym) >= 5 and sym not in _SYMBOL_STOPWORDS:
+                names.setdefault(sym.lower(), sym)   # "Cipla", "Titan", "Wipro" ...
+        _stat("NSE equity list", companies=len(names))
+        log.info("Loaded %d company names", len(names))
+    except Exception as exc:
+        _stat("NSE equity list", error=str(exc)[:200])
+        log.warning("Could not load NSE equity list (%s). "
+                    "RSS items will not be symbol-matched.", exc)
+    return names
+
+
+# =============================================================================
+# NSE ANNOUNCEMENTS
+# =============================================================================
+
+def fetch_nse_announcements(session: requests.Session) -> list[dict]:
+    """
+    NSE fields used: symbol, sm_name, desc (category), attchmntText (detail),
+    exchdisstime / an_dt (time).
+    """
+    today = datetime.now(IST).date()
+    from_date = today - timedelta(days=1)
+    url = NSE_ANNOUNCEMENTS_URL.format(
+        from_dt=from_date.strftime("%d-%m-%Y"),
+        to_dt=today.strftime("%d-%m-%Y"),
+    )
+    items: list[dict] = []
+    stat = _stat("NSE announcements", raw=0, kept=0, error=None)
 
     try:
+        data = _nse_get_json(session, url)
+        announcements = data.get("data", []) if isinstance(data, dict) else data
+        if not isinstance(announcements, list):
+            raise ValueError(f"Unexpected NSE payload: {type(announcements).__name__}")
 
-        result = analyze_batch(
-            news_data,
-            news_items,
-        )
+        stat["raw"] = len(announcements)
+        log.info("NSE returned %d raw announcements", len(announcements))
+        if announcements and isinstance(announcements[0], dict):
+            log.info("NSE record keys: %s", sorted(announcements[0].keys()))
 
-        analyses = result.get(
-            "analyses",
-            [],
-        )
+        for ann in announcements:
+            if not isinstance(ann, dict):
+                continue
 
-        log.info(
-            "Batch completed successfully: "
-            "%d/%d analyses returned.",
-            len(analyses),
-            len(news_items),
-        )
+            sym = _clean_text(ann.get("symbol")).upper()
+            company = _clean_text(ann.get("sm_name"))
+            category = _clean_text(ann.get("desc"))
+            detail = _clean_text(ann.get("attchmntText")) or _clean_text(ann.get("subject"))
+            combined = f"{sym} {company} {category} {detail}"
 
-        return analyses
+            keep_category = any(c in category.lower() for c in ALWAYS_KEEP_CATEGORIES)
+            if WATCHLIST_MODE:
+                keep = sym in WATCHLIST or keep_category or _is_relevant(combined)
+            else:
+                keep = keep_category or _is_relevant(combined)
+            if not keep:
+                continue
 
-    except Exception as e:
+            pub_dt = _parse_any_dt(_clean_text(ann.get("exchdisstime")) or _clean_text(ann.get("an_dt")))
+            if pub_dt is None or pub_dt.date() < _earliest_allowed_date():
+                stat["stale"] = stat.get("stale", 0) + 1
+                continue
+            if _is_noise(f"{category} {detail}", nse=True):
+                stat["noise"] = stat.get("noise", 0) + 1
+                continue
 
-        error_text = str(e)
-
-        log.warning(
-            "Batch of %d items failed: %s",
-            len(news_items),
-            error_text,
-        )
-
-        # If only one news item remains, we cannot split further.
-        if len(news_items) == 1:
-
-            raise
-
-        # Split batch in half
-        middle = len(news_items) // 2
-
-        first_half = news_items[
-            :middle
-        ]
-
-        second_half = news_items[
-            middle:
-        ]
-
-        log.warning(
-            "Splitting failed batch: %d items -> %d + %d",
-            len(news_items),
-            len(first_half),
-            len(second_half),
-        )
-
-        first_results = analyze_batch_with_retry(
-            news_data,
-            first_half,
-        )
-
-        second_results = analyze_batch_with_retry(
-            news_data,
-            second_half,
-        )
-
-        return (
-            first_results
-            + second_results
-        )
-
-
-# =============================================================================
-# MARKET SUMMARY
-# =============================================================================
-
-def build_market_summary(
-    analyses: list,
-) -> dict:
-
-    if not analyses:
-
-        return {
-            "market_summary": "No analysis available.",
-            "top_pick": None,
-            "top_pick_reason": "",
-        }
-
-    # -------------------------------------------------------------------------
-    # Count signals
-    # -------------------------------------------------------------------------
-
-    signal_counts = {
-        "BUY": 0,
-        "HOLD": 0,
-        "WATCH": 0,
-        "AVOID": 0,
-    }
-
-    for item in analyses:
-
-        signal = item.get(
-            "signal"
-        )
-
-        if signal in signal_counts:
-
-            signal_counts[
-                signal
-            ] += 1
-
-    # -------------------------------------------------------------------------
-    # Find highest conviction
-    # -------------------------------------------------------------------------
-
-    ranked = sorted(
-        analyses,
-        key=lambda x: (
-            x.get(
-                "conviction",
-                0,
+            etype = classify_announcement(f"{category} {detail}")
+            published = (
+                _clean_text(ann.get("exchdisstime"))
+                or _clean_text(ann.get("an_dt"))
+                or datetime.now(IST).isoformat()
             )
-            if isinstance(
-                x.get(
-                    "conviction",
-                    0,
-                ),
-                (int, float),
-            )
-            else 0
-        ),
-        reverse=True,
-    )
 
-    top = ranked[0]
+            items.append({
+                "id": _slug(f"nse|{sym}|{category}|{detail[:200]}|{published}"),
+                "source": "NSE",
+                "title": f"[{sym}] {category}".strip(),
+                "company": company,
+                "summary": (detail or category)[:500],
+                "url": _clean_text(ann.get("attchmntFile"))
+                       or "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+                "published": published,
+                "symbols": [sym] if sym else [],
+                "type": etype,
+            })
 
-    top_symbol = top.get(
-        "symbol"
-    )
+    except Exception as exc:
+        stat["error"] = str(exc)[:200]
+        log.warning("NSE announcements failed: %s", exc)
 
-    top_headline = top.get(
-        "headline"
-    )
-
-    top_reason = (
-        top_headline
-        if top_headline
-        else "Highest conviction analysis."
-    )
-
-    market_summary = (
-        f"Analyzed {len(analyses)} news events. "
-        f"Signals: "
-        f"BUY {signal_counts['BUY']}, "
-        f"HOLD {signal_counts['HOLD']}, "
-        f"WATCH {signal_counts['WATCH']}, "
-        f"AVOID {signal_counts['AVOID']}."
-    )
-
-    return {
-        "market_summary": market_summary,
-        "top_pick": top_symbol,
-        "top_pick_reason": top_reason,
-    }
+    stat["kept"] = len(items)
+    log.info("NSE: collected %d relevant announcements", len(items))
+    return items
 
 
 # =============================================================================
-# RUN COMPLETE ANALYSIS
+# NSE BULK / BLOCK DEALS
 # =============================================================================
 
-def run_analysis(
-    news_data: dict,
-) -> dict:
+def _rows_from_csv(session: requests.Session, url: str) -> list[dict]:
+    resp = session.get(url, timeout=20)
+    resp.raise_for_status()
+    return list(csv.DictReader(io.StringIO(resp.text)))
 
-    news_items = news_data.get(
-        "news",
-        [],
-    )
 
-    if not news_items:
+def _parse_deal_date(text):
+    text = _clean_text(text)
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d-%B-%Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
-        log.warning(
-            "No news items found."
-        )
 
-        return {
-            "analyses": [],
-            "market_summary": "No news available.",
-            "top_pick": None,
-            "top_pick_reason": "",
-        }
+def fetch_nse_deals(session: requests.Session) -> list[dict]:
+    """
+    Bulk + block deals of the LAST COMPLETED TRADING SESSION, merged PER STOCK.
 
-    # -------------------------------------------------------------------------
-    # Split into initial batches
-    # -------------------------------------------------------------------------
+    Run at 07:30 IST this is yesterday's session (Friday's on a Monday, or the
+    last session before a holiday). Only that one date is kept, so you always
+    get yesterday's full BUY/SELL flow.
 
-    batches = [
-        news_items[i:i + BATCH_SIZE]
-        for i in range(
-            0,
-            len(news_items),
-            BATCH_SIZE,
-        )
+    One item is emitted per symbol (net BUY/SELL value + top trades), so the
+    item count equals the number of stocks, not the number of trades.
+
+    Sources, first one that returns rows wins:
+      1. NSE JSON snapshot  (snapshot-capital-market-largedeal)
+      2. NSE archive CSVs   (bulk.csv / block.csv)
+      3. NSE historical API (unverified; NSE sometimes blocks it)
+    """
+    today = datetime.now(IST).date()
+    stat = _stat("NSE bulk/block deals", raw=0, kept=0, error=None, via="json")
+    raw_rows: list[tuple[str, dict]] = []
+
+    # ---- 1. snapshot JSON ---------------------------------------------------
+    try:
+        data = _nse_get_json(session, NSE_LARGE_DEALS_URL)
+        if isinstance(data, dict):
+            for key, kind in (("BULK_DEALS_DATA", "bulk"), ("BLOCK_DEALS_DATA", "block")):
+                for row in data.get(key) or []:
+                    if isinstance(row, dict):
+                        raw_rows.append((kind, row))
+    except Exception as exc:
+        stat["error"] = f"json: {str(exc)[:150]}"
+        log.warning("NSE large-deal JSON failed: %s", exc)
+
+    # ---- 2. archive CSVs ----------------------------------------------------
+    if not raw_rows:
+        stat["via"] = "csv"
+        for url, kind in ((NSE_BULK_CSV, "bulk"), (NSE_BLOCK_CSV, "block")):
+            try:
+                for row in _rows_from_csv(session, url):
+                    raw_rows.append((kind, row))
+            except Exception as exc:
+                prev = stat.get("error") or ""
+                stat["error"] = f"{prev} | csv {kind}: {str(exc)[:100]}".strip(" |")
+                log.warning("NSE %s deal CSV failed: %s", kind, exc)
+
+    # ---- 3. historical API (last resort) -----------------------------------
+    if not raw_rows:
+        stat["via"] = "historical"
+        frm = (today - timedelta(days=DEAL_MAX_AGE_DAYS)).strftime("%d-%m-%Y")
+        to = today.strftime("%d-%m-%Y")
+        for path, kind in (("bulk-deals", "bulk"), ("block-deals", "block")):
+            try:
+                url = f"https://www.nseindia.com/api/historical/{path}?from={frm}&to={to}"
+                data = _nse_get_json(session, url)
+                rows = data.get("data", []) if isinstance(data, dict) else data
+                for row in rows or []:
+                    if isinstance(row, dict):
+                        raw_rows.append((kind, row))
+            except Exception as exc:
+                prev = stat.get("error") or ""
+                stat["error"] = f"{prev} | hist {kind}: {str(exc)[:100]}".strip(" |")
+                log.warning("NSE historical %s deals failed: %s", kind, exc)
+
+    stat["raw"] = len(raw_rows)
+    if raw_rows:
+        log.info("Deal record keys: %s", sorted(raw_rows[0][1].keys()))
+
+    # ---- keep only the last completed session ------------------------------
+    dated = [
+        (_parse_deal_date(_pick(r, "date", "Date", "BD_DT_DATE")), k, r)
+        for k, r in raw_rows
     ]
+    parsed = [d for d, _, _ in dated if d]
+    if parsed:
+        recent = [d for d in parsed if 0 <= (today - d).days <= DEAL_MAX_AGE_DAYS]
+        if recent:
+            session_date = max(recent)
+            raw_rows = [(k, r) for d, k, r in dated if d is None or d == session_date]
+            stat["session_date"] = session_date.strftime("%d %b %Y")
+            log.info("Deals: using session %s (%d of %d rows)",
+                     stat["session_date"], len(raw_rows), len(dated))
+        else:
+            log.warning("Deals: newest date %s is older than %d days - ignoring stale data",
+                        max(parsed), DEAL_MAX_AGE_DAYS)
+            raw_rows = []
+    else:
+        log.warning("Deals: no parseable dates, keeping all %d rows", len(raw_rows))
 
-    log.info(
-        "Total news: %d | "
-        "Batch size: %d | "
-        "Total batches: %d",
-        len(news_items),
-        BATCH_SIZE,
-        len(batches),
-    )
-
-    all_analyses = []
-
-    # -------------------------------------------------------------------------
-    # Process every batch
-    # -------------------------------------------------------------------------
-
-    for index, batch in enumerate(
-        batches,
-        start=1,
-    ):
-
-        log.info(
-            "=================================================="
-        )
-
-        log.info(
-            "Processing batch %d/%d (%d items)...",
-            index,
-            len(batches),
-            len(batch),
-        )
-
-        batch_results = analyze_batch_with_retry(
-            news_data,
-            batch,
-        )
-
-        all_analyses.extend(
-            batch_results
-        )
-
-        log.info(
-            "Batch %d/%d complete. "
-            "Total analyses so far: %d",
-            index,
-            len(batches),
-            len(all_analyses),
-        )
-
-    # -------------------------------------------------------------------------
-    # Remove duplicate news IDs
-    # -------------------------------------------------------------------------
-
-    seen_ids = set()
-
-    unique_analyses = []
-
-    for analysis in all_analyses:
-
-        news_id = analysis.get(
-            "news_id"
-        )
-
-        # If no ID exists, keep it
-        if news_id is None:
-
-            unique_analyses.append(
-                analysis
-            )
-
+    # ---- merge trades per stock --------------------------------------------
+    groups: dict[str, dict] = {}
+    for kind, row in raw_rows:
+        sym = _pick(row, "symbol", "BD_SYMBOL").upper()
+        if not sym:
+            continue
+        if WATCHLIST_MODE and sym not in WATCHLIST:
             continue
 
-        if news_id not in seen_ids:
+        qty = _to_float(_pick(row, "qty", "Quantity Traded", "BD_QTY_TRD"))
+        price = _to_float(_pick(row, "watp", "Trade Price / Wght. Avg. Price", "BD_TP_WATP"))
+        value = qty * price
+        if value < MIN_DEAL_VALUE_INR:
+            continue
 
-            seen_ids.add(
-                news_id
-            )
+        side = _pick(row, "buySell", "Buy/Sell", "BD_BUY_SELL").upper() or "?"
+        client = _pick(row, "clientName", "Client Name", "BD_CLIENT_NAME")
+        name = _pick(row, "name", "Security Name", "BD_SCRIP_NAME")
+        date = _pick(row, "date", "Date", "BD_DT_DATE") or datetime.now(IST).date().isoformat()
 
-            unique_analyses.append(
-                analysis
-            )
+        g = groups.setdefault(sym, {"name": name, "date": date, "kinds": set(),
+                                    "buy": 0.0, "sell": 0.0, "rows": []})
+        g["name"] = g["name"] or name
+        g["kinds"].add(kind)
+        g["buy" if side.startswith("B") else "sell"] += value
+        g["rows"].append({"kind": kind, "side": side, "client": client,
+                          "qty": qty, "price": price, "value_inr": round(value)})
 
-    # -------------------------------------------------------------------------
-    # Preserve original news order
-    # -------------------------------------------------------------------------
+    ranked = sorted(groups.items(), key=lambda kv: kv[1]["buy"] + kv[1]["sell"], reverse=True)
+    if len(ranked) > MAX_DEALS:
+        log.warning("Deals: %d stocks, keeping the biggest %d (MAX_DEALS)", len(ranked), MAX_DEALS)
 
-    original_order = {
-        str(
-            item.get(
-                "id"
-            )
-        ): index
-        for index, item in enumerate(
-            news_items
+    items: list[dict] = []
+    for sym, g in ranked[:MAX_DEALS]:
+        buy_cr, sell_cr = g["buy"] / 1e7, g["sell"] / 1e7
+        net_cr = buy_cr - sell_cr
+        bias = "net BUY" if net_cr > 0 else "net SELL" if net_cr < 0 else "balanced"
+        kind = "block" if g["kinds"] == {"block"} else "bulk"
+        top = sorted(g["rows"], key=lambda r: r["value_inr"], reverse=True)[:3]
+        top_txt = "; ".join(
+            f"{r['client']} {r['side']} {int(r['qty']):,} @ Rs {r['price']:,.2f}" for r in top
         )
-    }
+        items.append({
+            "id": _slug(f"deals|{g['date']}|{sym}"),
+            "source": "NSE Bulk/Block Deals",
+            "title": f"[{sym}] {kind.title()} deals: {bias} Rs {abs(net_cr):,.1f} cr "
+                     f"({len(g['rows'])} trades)",
+            "company": g["name"],
+            "summary": (f"Buy Rs {buy_cr:,.1f} cr / Sell Rs {sell_cr:,.1f} cr on {g['date']}. "
+                        f"Top: {top_txt}")[:500],
+            "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+            "published": g["date"],
+            "symbols": [sym],
+            "type": f"{kind}_deal",
+            "deal": {"buy_cr": round(buy_cr, 1), "sell_cr": round(sell_cr, 1),
+                     "net_cr": round(net_cr, 1), "trades": g["rows"]},
+        })
 
-    unique_analyses.sort(
-        key=lambda x: original_order.get(
-            str(
-                x.get(
-                    "news_id"
+    tot_buy = sum(g["buy"] for g in groups.values()) / 1e7
+    tot_sell = sum(g["sell"] for g in groups.values()) / 1e7
+    stat.update(kept=len(items), total_rows=len(raw_rows), stocks=len(groups),
+                buy_value_cr=round(tot_buy, 1), sell_value_cr=round(tot_sell, 1))
+    log.info("NSE deals: %d trades -> %d stocks (BUY Rs %.1f cr / SELL Rs %.1f cr)",
+             len(raw_rows), len(items), tot_buy, tot_sell)
+    return items
+
+
+# =============================================================================
+# RSS FETCHER
+# =============================================================================
+
+_BAD_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+
+
+def _parse_feed(content: bytes):
+    """Parse RSS; if that yields no entries, repair control chars / bare '&' and retry."""
+    feed = feedparser.parse(content)
+    if feed.entries:
+        return feed
+    text = content.decode("utf-8", errors="ignore")
+    text = _BARE_AMP.sub("&amp;", _BAD_XML_CHARS.sub("", text))
+    return feedparser.parse(text.encode("utf-8"))
+
+
+def _entry_time(entry) -> datetime | None:
+    st = entry.get("published_parsed") or entry.get("updated_parsed")
+    if st:
+        return datetime.fromtimestamp(calendar.timegm(st), tz=timezone.utc)
+    return None
+
+
+def fetch_rss_news(name_map: dict[str, str]) -> list[dict]:
+    items: list[dict] = []
+    now = datetime.now(timezone.utc)
+    cutoff = datetime.combine(_earliest_allowed_date(), datetime.min.time(),
+                              tzinfo=IST).astimezone(timezone.utc)
+    require_symbol = (not WATCHLIST_MODE) and REQUIRE_SYMBOL_FOR_RSS and bool(name_map)
+    unresolved = 0   # symbol-less items kept so far (shared across feeds)
+
+    for cfg in RSS_FEEDS:
+        name, url = cfg["name"], cfg["url"]
+        stat = _stat(name, entries=0, stale=0, irrelevant=0, no_symbol=0, kept=0, error=None)
+        try:
+            log.info("Fetching RSS: %s", name)
+            resp = requests.get(url, headers=RSS_HEADERS, timeout=20)
+            stat["http_status"] = resp.status_code
+            resp.raise_for_status()
+
+            feed = _parse_feed(resp.content)
+            if getattr(feed, "bozo", False) and not feed.entries:
+                log.warning("RSS parse warning for %s: %s", name,
+                            getattr(feed, "bozo_exception", "unknown"))
+
+            entries = feed.entries[:60]
+            stat["entries"] = len(entries)
+
+            for entry in entries:
+                published_dt = _entry_time(entry)
+                if published_dt is None or published_dt < cutoff:   # undated = unknown age = drop
+                    stat["stale"] += 1
+                    continue
+
+                title = _clean_text(entry.get("title"))
+                raw_summary = _clean_text(entry.get("summary"))
+                summary = BeautifulSoup(raw_summary, "html.parser").get_text(
+                    separator=" ", strip=True
                 )
-            ),
-            999999,
+                combined = f"{title} {summary}"
+
+                if _is_noise(combined):
+                    stat["noise"] = stat.get("noise", 0) + 1
+                    continue
+                if not _is_relevant(combined):
+                    stat["irrelevant"] += 1
+                    continue
+
+                symbols = _symbols_for_text(combined, name_map)
+                etype = classify_announcement(combined)
+                if not symbols and require_symbol:
+                    stat["no_symbol"] += 1
+                    continue
+                if not symbols and not WATCHLIST_MODE:
+                    # Keep unresolved items only if they look like a real event,
+                    # up to a cap; the AI step can still read the company name.
+                    if etype == "general" or unresolved >= UNRESOLVED_RSS_MAX:
+                        stat["no_symbol"] += 1
+                        continue
+                    unresolved += 1
+                    stat["unresolved_kept"] = stat.get("unresolved_kept", 0) + 1
+                published = (
+                    published_dt.astimezone(IST).isoformat()
+                    if published_dt
+                    else _clean_text(entry.get("published")) or datetime.now(IST).isoformat()
+                )
+
+                items.append({
+                    "id": _slug(_norm(title)),
+                    "source": name,
+                    "title": title,
+                    "summary": summary[:500],
+                    "url": _clean_text(entry.get("link")),
+                    "published": published,
+                    "symbols": symbols,
+                    "type": "news" if etype == "general" else etype,
+                })
+                stat["kept"] += 1
+
+        except Exception as exc:
+            stat["error"] = str(exc)[:200]
+            log.warning("RSS fetch failed for %s: %s", name, exc)
+
+        log.info(
+            "RSS %-34s http=%s entries=%s stale=%s irrelevant=%s no_symbol=%s kept=%s%s",
+            name, stat.get("http_status"), stat["entries"], stat["stale"],
+            stat["irrelevant"], stat["no_symbol"], stat["kept"],
+            f" ERROR={stat['error']}" if stat["error"] else "",
         )
+
+    log.info("RSS: collected %d relevant items", len(items))
+    return items
+
+
+# =============================================================================
+# YAHOO FINANCE
+# =============================================================================
+
+def fetch_yahoo_finance(symbol: str) -> dict | None:
+    """Price info for an NSE stock (TCS -> TCS.NS)."""
+    symbol = _clean_text(symbol).upper()
+    if not symbol:
+        return None
+
+    url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        f"{quote(symbol + '.NS')}?interval=1d&range=5d"   # quote(): M&M.NS etc.
     )
 
-    # -------------------------------------------------------------------------
-    # Log result count
-    # -------------------------------------------------------------------------
+    try:
+        response = requests.get(url, headers={"User-Agent": RSS_HEADERS["User-Agent"]}, timeout=15)
+        response.raise_for_status()
+        results = (response.json().get("chart") or {}).get("result")
+        if not results:
+            log.warning("Yahoo returned no result for %s", symbol)
+            return None
 
-    log.info(
-        "=================================================="
-    )
+        chart_data = results[0]
+        meta = chart_data.get("meta", {})
+        quote_list = (chart_data.get("indicators") or {}).get("quote", [])
+        if not quote_list:
+            log.warning("Yahoo returned no quote data for %s", symbol)
+            return None
 
-    log.info(
-        "News items received: %d",
-        len(news_items),
-    )
+        timestamps = chart_data.get("timestamp") or []
+        pairs = [
+            (ts, v)
+            for ts, v in zip(timestamps, quote_list[0].get("close", []))
+            if v is not None
+        ]
+        closes = [v for _, v in pairs]
+        as_of = (
+            datetime.fromtimestamp(pairs[-1][0], tz=IST).strftime("%d %b %Y")
+            if pairs else None
+        )
+        prev_close = closes[-2] if len(closes) >= 2 else None
+        curr_close = closes[-1] if closes else None
 
-    log.info(
-        "Unique analyses generated: %d",
-        len(unique_analyses),
-    )
+        change_pct = None
+        if prev_close and curr_close is not None:
+            change_pct = round((curr_close - prev_close) / prev_close * 100, 2)
 
-    # -------------------------------------------------------------------------
-    # Market summary
-    # -------------------------------------------------------------------------
+        return {
+            "symbol": symbol,
+            "price": curr_close,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "52w_high": meta.get("fiftyTwoWeekHigh"),
+            "52w_low": meta.get("fiftyTwoWeekLow"),
+            "currency": meta.get("currency", "INR"),
+            "as_of": as_of,          # date of the latest close
+        }
 
-    summary = build_market_summary(
-        unique_analyses
-    )
+    except requests.exceptions.RequestException as exc:
+        log.warning("Yahoo request failed for %s: %s", symbol, exc)
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        log.warning("Yahoo data parsing failed for %s: %s", symbol, exc)
+    except Exception as exc:
+        log.warning("Yahoo fetch failed for %s: %s", symbol, exc)
+    return None
 
-    return {
-        "analyses": unique_analyses,
-        "market_summary": summary[
-            "market_summary"
-        ],
-        "top_pick": summary[
-            "top_pick"
-        ],
-        "top_pick_reason": summary[
-            "top_pick_reason"
-        ],
-    }
+
+# =============================================================================
+# GROUP BY STOCK
+# =============================================================================
+
+def build_stocks(items: list[dict], prices: dict) -> tuple[list[dict], list[dict]]:
+    """
+    One entry per stock (price may be None) with all its news items, ordered by
+    highest-priority event. Items with no resolved symbol go to `unmatched`.
+    """
+    stocks: dict[str, dict] = {}
+    unmatched: list[dict] = []
+    for it in items:
+        syms = it.get("symbols") or []
+        if not syms:
+            unmatched.append(it)
+            continue
+        for s in syms:
+            st = stocks.setdefault(s, {
+                "symbol": s,
+                "company": "",
+                "price": prices.get(s),       # None if Yahoo failed / unknown symbol
+                "priority": 0,
+                "news": [],
+            })
+            st["company"] = st["company"] or it.get("company", "")
+            st["priority"] = max(st["priority"], it.get("priority", 0))
+            st["news"].append(it)
+    ordered = sorted(stocks.values(), key=lambda x: x["priority"], reverse=True)
+    return ordered, unmatched
 
 
 # =============================================================================
@@ -1224,156 +973,94 @@ def run_analysis(
 # =============================================================================
 
 def main():
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # -------------------------------------------------------------------------
-    # Check input
-    # -------------------------------------------------------------------------
+    mode_label = "FOCUSED (watchlist)" if WATCHLIST_MODE else "BROAD (all NSE stocks)"
+    log.info("Running in %s mode", mode_label)
 
-    if not INPUT_FILE.exists():
+    session = _nse_session()
+    name_map = {} if WATCHLIST_MODE else load_company_names(session)
 
-        log.error(
-            "Input file not found at %s. "
-            "Run news fetcher first.",
-            INPUT_FILE,
-        )
+    nse_items = fetch_nse_announcements(session)
+    deal_items = fetch_nse_deals(session)
+    rss_items = fetch_rss_news(name_map)
 
-        return
+    log.info("Fetched %d NSE + %d deal stocks + %d RSS items",
+             len(nse_items), len(deal_items), len(rss_items))
 
-    # -------------------------------------------------------------------------
-    # Create output directory
-    # -------------------------------------------------------------------------
+    # ---- deduplicate --------------------------------------------------------
+    seen: set[str] = set()
+    all_items: list[dict] = []
+    for item in nse_items + deal_items + rss_items:
+        item_id = item.get("id")
+        if item_id and item_id not in seen:
+            seen.add(item_id)
+            all_items.append(item)
 
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    # ---- rank BEFORE truncating --------------------------------------------
+    for item in all_items:
+        item["priority"] = PRIORITY.get(item.get("type", "general"), 30)
+    all_items.sort(key=lambda i: (i["priority"], bool(i.get("symbols"))), reverse=True)
 
-    # -------------------------------------------------------------------------
-    # Read news data
-    # -------------------------------------------------------------------------
+    if len(all_items) > MAX_ITEMS_OUT:
+        log.info("Truncating %d -> %d items (ranked by priority)", len(all_items), MAX_ITEMS_OUT)
+        all_items = all_items[:MAX_ITEMS_OUT]
 
-    try:
+    log.info("Total unique news items: %d", len(all_items))
 
-        news_data = json.loads(
-            INPUT_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
+    # ---- symbols for price lookup ------------------------------------------
+    if WATCHLIST_MODE:
+        price_symbols = list(WATCHLIST.keys())
+    else:
+        price_symbols = []
+        for item in all_items:                      # already priority-ordered
+            candidates = list(item.get("symbols") or [])
+            nse_sym = _extract_nse_symbol(item.get("title", ""))
+            if nse_sym:
+                candidates.append(nse_sym)
+            for s in candidates:
+                s = _clean_text(s).upper()
+                if s and s not in price_symbols:
+                    price_symbols.append(s)
+            if len(price_symbols) >= MAX_PRICE_SYMBOLS:
+                break
+        price_symbols = price_symbols[:MAX_PRICE_SYMBOLS]
+    log.info("Fetching prices for %d symbols", len(price_symbols))
 
-    except json.JSONDecodeError as e:
+    price_data: dict[str, dict] = {}
+    for symbol in sorted(price_symbols):
+        data = fetch_yahoo_finance(symbol)
+        if data:
+            price_data[symbol] = data
+        time.sleep(0.2)
 
-        log.error(
-            "Invalid JSON in %s: %s",
-            INPUT_FILE,
-            e,
-        )
+    # ---- group by stock -----------------------------------------------------
+    stocks, unmatched = build_stocks(all_items, price_data)
+    no_price = sum(1 for s in stocks if not s["price"])
+    log.info("Stocks: %d unique (%d without price), %d unmatched news items",
+             len(stocks), no_price, len(unmatched))
 
-        raise
+    # ---- output -------------------------------------------------------------
+    output = {
+        "generated_at": datetime.now(IST).isoformat(),
+        "mode": mode_label,
+        "news_count": len(all_items),
+        "stock_count": len(stocks),
+        "by_type": dict(Counter(i["type"] for i in all_items)),
+        "source_stats": SOURCE_STATS,       # which source returned what / failed
+        "news": all_items,                  # flat list (kept for compatibility)
+        "stocks": stocks,                   # one entry per stock: price + all its news
+        "unmatched_news": unmatched,        # items with no resolvable symbol
+        "prices": price_data,
+    }
 
-    # -------------------------------------------------------------------------
-    # Log news count
-    # -------------------------------------------------------------------------
+    OUTPUT_FILE.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.info("Saved %d news items, %d stocks, %d price records",
+             len(all_items), len(stocks), len(price_data))
+    log.info("By type: %s", output["by_type"])
+    for src, st in SOURCE_STATS.items():
+        log.info("SOURCE %-34s %s", src, st)
 
-    news_count = len(
-        news_data.get(
-            "news",
-            [],
-        )
-    )
-
-    log.info(
-        "Analyzing %d news items...",
-        news_count,
-    )
-
-    # -------------------------------------------------------------------------
-    # Run analysis
-    # -------------------------------------------------------------------------
-
-    result = run_analysis(
-        news_data
-    )
-
-    # -------------------------------------------------------------------------
-    # Add original price data
-    # -------------------------------------------------------------------------
-
-    result["prices"] = news_data.get(
-        "prices",
-        {},
-    )
-
-    # -------------------------------------------------------------------------
-    # Add generated timestamp
-    # -------------------------------------------------------------------------
-
-    result["generated_at"] = news_data.get(
-        "generated_at"
-    )
-
-    # -------------------------------------------------------------------------
-    # Add AI model
-    # -------------------------------------------------------------------------
-
-    result["ai_model"] = ACTIVE_GEMINI_MODEL
-
-    # -------------------------------------------------------------------------
-    # Save output
-    # -------------------------------------------------------------------------
-
-    OUTPUT_FILE.write_text(
-        json.dumps(
-            result,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    # -------------------------------------------------------------------------
-    # Final log
-    # -------------------------------------------------------------------------
-
-    log.info(
-        "=================================================="
-    )
-
-    log.info(
-        "Analysis saved to %s",
-        OUTPUT_FILE,
-    )
-
-    log.info(
-        "%d items analyzed.",
-        len(
-            result.get(
-                "analyses",
-                [],
-            )
-        ),
-    )
-
-    log.info(
-        "Top pick: %s",
-        result.get(
-            "top_pick",
-            "None",
-        ),
-    )
-
-    log.info(
-        "Gemini model used: %s",
-        ACTIVE_GEMINI_MODEL,
-    )
-
-    log.info(
-        "=================================================="
-    )
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     main()
